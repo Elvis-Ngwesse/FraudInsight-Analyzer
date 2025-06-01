@@ -5,6 +5,7 @@ RUN apt-get update && apt-get install -y \
     espeak \
     libespeak1 \
     libasound2 \
+    libpulse0 \
     ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 

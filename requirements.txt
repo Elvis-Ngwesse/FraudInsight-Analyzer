@@ -2,3 +2,5 @@ pika
 redis
 faker
 pyttsx3
+minio
+gTTS

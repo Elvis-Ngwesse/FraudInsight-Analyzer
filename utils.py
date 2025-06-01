@@ -14,7 +14,7 @@ def generate_customer():
         "email": fake.email()
     }
 
-def generate_dialogue(total_lines=1000):
+def generate_dialogue(total_lines=500):
     """
     Generate a natural scenario-based dialogue with alternating customer and bank lines.
     total_lines: total lines in dialogue (should be even).

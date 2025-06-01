@@ -8,7 +8,6 @@ from utils import generate_customer, generate_dialogue
 
 logging.basicConfig(level=logging.INFO)
 
-# Environment-driven config
 RABBITMQ_HOST = os.getenv("RABBITMQ_HOST", "localhost")
 REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
 REDIS_PORT = int(os.getenv("REDIS_PORT", 6379))
@@ -18,13 +17,21 @@ DELAY_BETWEEN_MESSAGES = 120  # seconds
 
 MAX_RETRIES = 10
 RETRY_DELAY = 5  # seconds
+HEARTBEAT_INTERVAL = 120  # seconds
 
 
 def connect_to_rabbitmq():
+    parameters = pika.ConnectionParameters(
+        host=RABBITMQ_HOST,
+        heartbeat=HEARTBEAT_INTERVAL,
+        blocked_connection_timeout=300,
+        connection_attempts=MAX_RETRIES,
+        retry_delay=RETRY_DELAY
+    )
     for attempt in range(MAX_RETRIES):
         try:
             logging.info(f"Connecting to RabbitMQ at {RABBITMQ_HOST} (attempt {attempt + 1})")
-            connection = pika.BlockingConnection(pika.ConnectionParameters(RABBITMQ_HOST))
+            connection = pika.BlockingConnection(parameters)
             logging.info("Connected to RabbitMQ.")
             return connection
         except pika.exceptions.AMQPConnectionError as e:
@@ -37,10 +44,10 @@ def connect_to_redis():
     for attempt in range(MAX_RETRIES):
         try:
             logging.info(f"Connecting to Redis at {REDIS_HOST}:{REDIS_PORT} (attempt {attempt + 1})")
-            r = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, db=0)
-            r.ping()
+            redis_client = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, db=0)
+            redis_client.ping()
             logging.info("Connected to Redis.")
-            return r
+            return redis_client
         except redis.exceptions.ConnectionError as e:
             logging.warning(f"Redis not ready: {e}")
             time.sleep(RETRY_DELAY)
@@ -66,16 +73,32 @@ def main():
             "timestamp": timestamp
         }
 
-        # Send to RabbitMQ
-        channel.basic_publish(
-            exchange='',
-            routing_key=QUEUE_NAME,
-            body=json.dumps(message),
-            properties=pika.BasicProperties(delivery_mode=2)  # make message persistent
-        )
+        try:
+            channel.basic_publish(
+                exchange='',
+                routing_key=QUEUE_NAME,
+                body=json.dumps(message),
+                properties=pika.BasicProperties(delivery_mode=2)
+            )
+        except (pika.exceptions.AMQPConnectionError, pika.exceptions.ChannelWrongStateError) as e:
+            logging.error(f"Failed to publish message: {e}. Reconnecting and retrying.")
+            # Reconnect and retry once
+            try:
+                rabbit_conn.close()
+            except Exception:
+                pass
+            rabbit_conn = connect_to_rabbitmq()
+            channel = rabbit_conn.channel()
+            channel.queue_declare(queue=QUEUE_NAME, durable=True)
+            channel.basic_publish(
+                exchange='',
+                routing_key=QUEUE_NAME,
+                body=json.dumps(message),
+                properties=pika.BasicProperties(delivery_mode=2)
+            )
 
-        # Store metadata in Redis
-        redis_client.hset(message_id, mapping={
+        redis_key = f"text:{message_id}"
+        redis_client.hset(redis_key, mapping={
             "customer_id": customer["id"],
             "customer_name": customer["name"],
             "queue": QUEUE_NAME,
