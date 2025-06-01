@@ -1,0 +1,4 @@
+pika
+redis
+faker
+pyttsx3

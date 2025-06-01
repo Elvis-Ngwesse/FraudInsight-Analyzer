@@ -1,0 +1,59 @@
+version: '3.8'
+
+services:
+  rabbitmq:
+    image: rabbitmq:3-management
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    environment:
+      RABBITMQ_DEFAULT_USER: guest
+      RABBITMQ_DEFAULT_PASS: guest
+
+  redis:
+    image: redis:7
+    ports:
+      - "6379:6379"
+    command: ["redis-server", "--save", "60", "1"]
+
+  redis-commander:
+    image: rediscommander/redis-commander:latest
+    depends_on:
+      - redis
+    environment:
+      - REDIS_HOSTS=local:redis:6379
+    ports:
+      - "8081:8081"
+
+  text_producer:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      - rabbitmq
+      - redis
+    environment:
+      - RABBITMQ_HOST=rabbitmq
+      - REDIS_HOST=redis
+    volumes:
+      - ./text_producer.py:/app/text_producer.py
+      - ./utils.py:/app/utils.py
+      - ./requirements.txt:/app/requirements.txt
+    command: ["python", "/app/text_producer.py"]
+
+  voice_producer:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      - rabbitmq
+      - redis
+    environment:
+      - RABBITMQ_HOST=rabbitmq
+      - REDIS_HOST=redis
+    volumes:
+      - ./voice_producer.py:/app/voice_producer.py
+      - ./utils.py:/app/utils.py
+      - ./requirements.txt:/app/requirements.txt
+      - ./audio_files:/app/audio_files
+    command: ["python", "/app/voice_producer.py"]
