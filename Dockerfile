@@ -1,12 +1,10 @@
 FROM python:3.11-slim
 
-# Install dependencies needed for pyttsx3 + ffmpeg + audio libs
+# Install dependencies for pyttsx3 to work (including espeak)
 RUN apt-get update && apt-get install -y \
     espeak \
-    libespeak1 \
-    libasound2 \
-    libpulse0 \
     ffmpeg \
+    libespeak1 \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

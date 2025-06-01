@@ -6,7 +6,7 @@ import logging
 import os
 import tempfile
 import traceback
-from gtts import gTTS
+import pyttsx3
 from minio import Minio
 from minio.error import S3Error
 from utils import generate_customer, generate_dialogue
@@ -23,8 +23,8 @@ MINIO_ENDPOINT = os.getenv("MINIO_ENDPOINT", "minio:9000")
 MINIO_ACCESS_KEY = os.getenv("MINIO_ACCESS_KEY", "minioadmin")
 MINIO_SECRET_KEY = os.getenv("MINIO_SECRET_KEY", "minioadmin")
 MINIO_BUCKET = os.getenv("MINIO_BUCKET", "audiofiles")
-MAX_RETRIES = 10
-RETRY_DELAY = 5
+MAX_RETRIES = 5         # max retries for TTS or connections
+RETRY_DELAY = 5         # initial retry delay in seconds
 HEARTBEAT_INTERVAL = 120
 
 # --- MinIO client setup ---
@@ -39,18 +39,31 @@ if not minio_client.bucket_exists(MINIO_BUCKET):
     minio_client.make_bucket(MINIO_BUCKET)
     logging.info(f"Created MinIO bucket: {MINIO_BUCKET}")
 
-# --- TTS using gTTS ---
+# --- Initialize pyttsx3 engine once ---
+tts_engine = pyttsx3.init()
+tts_engine.setProperty('rate', 150)   # speaking speed
+tts_engine.setProperty('volume', 1.0) # volume (0.0 to 1.0)
+
+# --- TTS with retry and exponential backoff ---
 def text_to_speech_file_to_temp(text):
-    with tempfile.NamedTemporaryFile(delete=False, suffix='.mp3') as tmp_file:
-        temp_path = tmp_file.name
-    try:
-        tts = gTTS(text)
-        tts.save(temp_path)
-        logging.info(f"TTS generated and saved to {temp_path}")
-        return temp_path
-    except Exception as e:
-        logging.error(f"TTS generation failed: {e}")
-        return None
+    delay = RETRY_DELAY
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            with tempfile.NamedTemporaryFile(delete=False, suffix='.wav') as tmp_file:
+                temp_path = tmp_file.name
+            tts_engine.save_to_file(text, temp_path)
+            tts_engine.runAndWait()
+            logging.info(f"TTS generated and saved to {temp_path}")
+            return temp_path
+        except Exception as e:
+            logging.error(f"TTS generation failed on attempt {attempt}/{MAX_RETRIES}: {e}")
+            if attempt == MAX_RETRIES:
+                return None
+            else:
+                logging.info(f"Retrying TTS in {delay} seconds...")
+                time.sleep(delay)
+                delay = min(delay * 2, 60)  # exponential backoff, max 60s
+    return None
 
 def upload_file_to_minio(local_path, bucket, object_name):
     try:
@@ -112,7 +125,7 @@ def main():
             complaint_text = generate_dialogue()
             timestamp = time.time()
             message_id = f"voice-{customer['id']}-{int(timestamp)}"
-            minio_object_name = f"{message_id}.mp3"
+            minio_object_name = f"{message_id}.wav"   # note .wav extension
 
             logging.info(f"[{i + 1}/2000] Generating TTS for: {message_id}")
 
@@ -170,6 +183,7 @@ def main():
             logging.error(f"Unexpected error at iteration {i + 1}: {e}")
             logging.error(traceback.format_exc())
 
+        # Sleep 2 minutes between each complaint (offline TTS - no API rate limit)
         time.sleep(120)
 
     try:
@@ -177,10 +191,11 @@ def main():
     except Exception:
         pass
 
-
     logging.info("Finished sending all voice complaints.")
+
+    # Keep container alive if needed
     while True:
-        time.sleep(3600)  # Keep the container alive
+        time.sleep(3600)
 
 if __name__ == "__main__":
     main()
