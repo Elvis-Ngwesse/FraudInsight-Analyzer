@@ -7,6 +7,7 @@ import tempfile
 from minio import Minio
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 import whisper
+import wave
 
 logging.basicConfig(level=logging.INFO)
 
@@ -23,46 +24,62 @@ MINIO_BUCKET = os.getenv("MINIO_BUCKET", "audiofiles")
 
 # --- Clients ---
 redis_client = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, db=0)
-minio_client = Minio(
-    MINIO_ENDPOINT,
-    access_key=MINIO_ACCESS_KEY,
-    secret_key=MINIO_SECRET_KEY,
-    secure=False  # Change to True if using HTTPS
-)
+minio_client = Minio(MINIO_ENDPOINT, access_key=MINIO_ACCESS_KEY, secret_key=MINIO_SECRET_KEY, secure=False)
 whisper_model = whisper.load_model("base")
 analyzer = SentimentIntensityAnalyzer()
 
 
-def download_audio(object_name):
+def download_audio_from_minio(object_name):
     """
-    Download the audio object from MinIO to a temp file and return the path.
+    Downloads the audio file from MinIO and returns the local temporary file path.
     """
-    temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".wav")
-    temp_file.close()  # Close the file so MinIO can write to it
     try:
-        minio_client.fget_object(MINIO_BUCKET, object_name, temp_file.name)
-        return temp_file.name
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp_file:
+            minio_client.fget_object(MINIO_BUCKET, object_name, tmp_file.name)
+            logging.info(f"Downloaded audio file from MinIO: {object_name} -> {tmp_file.name}")
+
+            # Check if file is empty
+            file_size = os.path.getsize(tmp_file.name)
+            if file_size == 0:
+                raise Exception("Downloaded file is empty (0 bytes)")
+
+            # Validate WAV format by opening with wave module
+            try:
+                with wave.open(tmp_file.name, 'rb') as wav_file:
+                    logging.info(f"WAV file parameters: channels={wav_file.getnchannels()}, "
+                                 f"framerate={wav_file.getframerate()}, "
+                                 f"frames={wav_file.getnframes()}")
+            except wave.Error as e:
+                raise Exception(f"Invalid WAV file: {e}")
+
+            return tmp_file.name
     except Exception as e:
-        os.unlink(temp_file.name)  # Clean up if download failed
-        raise e
+        raise Exception(f"Failed to download or validate audio from MinIO: {e}")
 
 
 def callback(ch, method, properties, body):
-    message = json.loads(body)
-    message_id = message.get("message_id", "unknown")
-    object_name = message.get("object_name")  # Expect object key, e.g., "voice-123.wav"
-
-    if not object_name:
-        logging.error(f"Message {message_id} missing 'object_name' field.")
-        ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)
-        return
-
     try:
-        audio_path = download_audio(object_name)
-        result = whisper_model.transcribe(audio_path)
-        transcript = result["text"]
-        sentiment = analyzer.polarity_scores(transcript)
+        message = json.loads(body)
+        message_id = message.get("message_id", "unknown")
+        object_name = message.get("object_name")
 
+        if not object_name:
+            raise ValueError(f"Message {message_id} missing 'object_name' field.")
+
+        audio_path = download_audio_from_minio(object_name)
+
+        # Transcribe audio
+        result = whisper_model.transcribe(audio_path)
+        transcript = result.get("text", "").strip()
+        logging.info(f"Transcript for {message_id}: '{transcript}'")
+
+        if not transcript:
+            logging.warning(f"Empty transcript for message {message_id}")
+
+        sentiment = analyzer.polarity_scores(transcript)
+        logging.info(f"Sentiment for {message_id}: {sentiment}")
+
+        # Save analysis in Redis
         redis_key = f"analysis:{message_id}"
         redis_client.hset(redis_key, mapping={
             "transcript": transcript,
@@ -72,14 +89,14 @@ def callback(ch, method, properties, body):
             "sentiment_compound": sentiment['compound']
         })
 
-        logging.info(f"Processed voice message {message_id} | Compound: {sentiment['compound']}")
-
-        # Cleanup temp audio file after processing
-        os.unlink(audio_path)
+        # Clean up temporary audio file
+        os.remove(audio_path)
 
         ch.basic_ack(delivery_tag=method.delivery_tag)
+
     except Exception as e:
-        logging.error(f"Failed to process {message_id}: {e}")
+        logging.error(f"Failed to process message: {e}")
+        # Nack and discard message (no requeue)
         ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)
 
 

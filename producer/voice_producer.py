@@ -70,10 +70,10 @@ def upload_file_to_minio(local_path, bucket, object_name):
     try:
         minio_client.fput_object(bucket, object_name, local_path)
         logging.info(f"Uploaded {local_path} to MinIO bucket '{bucket}' as '{object_name}'")
-        return f"http://{MINIO_ENDPOINT}/{bucket}/{object_name}"
+        return True
     except S3Error as e:
         logging.error(f"Failed to upload file to MinIO: {e}")
-        return None
+        return False
 
 def connect_to_rabbitmq():
     delay = RETRY_DELAY
@@ -136,12 +136,12 @@ def main():
                 if not temp_audio_path:
                     logging.error(f"Skipping message {message_id} due to TTS failure")
                     continue
-                minio_url = upload_file_to_minio(temp_audio_path, MINIO_BUCKET, minio_object_name)
+                upload_success = upload_file_to_minio(temp_audio_path, MINIO_BUCKET, minio_object_name)
             finally:
                 if temp_audio_path and os.path.exists(temp_audio_path):
                     os.remove(temp_audio_path)
 
-            if not minio_url:
+            if not upload_success:
                 logging.error(f"Skipping message {message_id} due to upload failure")
                 continue
 
@@ -149,7 +149,7 @@ def main():
                 "message_id": message_id,
                 "customer": customer,
                 "timestamp": timestamp,
-                "audio_url": minio_url
+                "object_name": minio_object_name  # <-- send object_name here
             }
 
             if not publish_message(channel, message):
@@ -175,7 +175,7 @@ def main():
                 "customer_name": customer['name'],
                 "queue": QUEUE_NAME,
                 "timestamp": timestamp,
-                "audio_url": minio_url
+                "object_name": minio_object_name
             })
 
             logging.info(f"[{i + 1}/2000] Sent voice complaint: {message_id}")
