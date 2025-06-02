@@ -26,6 +26,7 @@ MINIO_BUCKET = os.getenv("MINIO_BUCKET", "audiofiles")
 MAX_RETRIES = 5         # max retries for TTS or connections
 RETRY_DELAY = 5         # initial retry delay in seconds
 HEARTBEAT_INTERVAL = 120
+DELAY_BETWEEN_MESSAGES = 60  # seconds
 
 # --- MinIO client setup ---
 minio_client = Minio(
@@ -183,8 +184,8 @@ def main():
             logging.error(f"Unexpected error at iteration {i + 1}: {e}")
             logging.error(traceback.format_exc())
 
-        # Sleep 2 minutes between each complaint (offline TTS - no API rate limit)
-        time.sleep(120)
+        # Sleep 1 minute between each complaint (offline TTS - no API rate limit)
+        time.sleep(DELAY_BETWEEN_MESSAGES)
 
     try:
         connection.close()

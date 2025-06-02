@@ -1,0 +1,9 @@
+pika
+redis
+whisper
+spacy
+transformers
+vaderSentiment
+minio
+openai-whisper==20231117
+boto3

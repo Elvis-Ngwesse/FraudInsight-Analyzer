@@ -13,7 +13,7 @@ REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
 REDIS_PORT = int(os.getenv("REDIS_PORT", 6379))
 QUEUE_NAME = 'text_complaints'
 TOTAL_MESSAGES = 2000
-DELAY_BETWEEN_MESSAGES = 120  # seconds
+DELAY_BETWEEN_MESSAGES = 60  # seconds
 
 MAX_RETRIES = 10
 RETRY_DELAY = 5  # seconds

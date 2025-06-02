@@ -1,0 +1,72 @@
+services:
+  text_consumer:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      - RABBITMQ_HOST=rabbitmq
+      - RABBITMQ_PORT=5672
+      - RABBITMQ_USER=guest
+      - RABBITMQ_PASS=guest
+      - RABBITMQ_VHOST=/
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+    volumes:
+      - ./text_consumer.py:/app/text_consumer.py
+      - ./requirements.txt:/app/requirements.txt
+    command: ["python", "/app/text_consumer.py"]
+    networks:
+      - producer_app-network
+
+  voice_consumer:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      - RABBITMQ_HOST=rabbitmq
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - MINIO_ENDPOINT=minio:9000
+      - MINIO_ACCESS_KEY=minioadmin
+      - MINIO_SECRET_KEY=minioadmin
+      - MINIO_BUCKET=audiofiles
+      - RABBITMQ_PORT=5672
+      - RABBITMQ_USER=guest
+      - RABBITMQ_PASS=guest
+      - RABBITMQ_VHOST=/
+    volumes:
+      - ./voice_consumer.py:/app/voice_consumer.py
+      - ./requirements.txt:/app/requirements.txt
+    command: ["python", "/app/voice_consumer.py"]
+    networks:
+      - producer_app-network
+
+  grafana:
+    image: grafana/grafana
+    ports:
+      - "3000:3000"
+    networks:
+      - producer_app-network
+    volumes:
+      - grafana-storage:/var/lib/grafana
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+
+  metabase:
+    image: metabase/metabase:latest
+    platform: linux/amd64
+    ports:
+      - "3001:3000"
+    volumes:
+      - metabase-data:/metabase-data
+    networks:
+      - producer_app-network
+
+networks:
+  producer_app-network:
+    external: true
+
+volumes:
+  grafana-storage:
+  metabase-data:

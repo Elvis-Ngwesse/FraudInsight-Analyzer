@@ -30,6 +30,10 @@ venv\Scripts\activate
 deactivate
 
 
+
+docker-compose -f producer/docker-compose.yml up --build
+
+
 1. RabbitMQ Management UI
    URL: http://localhost:15672
 

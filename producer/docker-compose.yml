@@ -9,6 +9,8 @@ services:
     environment:
       RABBITMQ_DEFAULT_USER: guest
       RABBITMQ_DEFAULT_PASS: guest
+    networks:
+      - app-network
     healthcheck:
       test: ["CMD", "rabbitmqctl", "status"]
       interval: 30s
@@ -21,6 +23,8 @@ services:
     ports:
       - "6379:6379"
     command: ["redis-server", "--save", "60", "1"]
+    networks:
+      - app-network
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 30s
@@ -37,6 +41,9 @@ services:
       - REDIS_HOSTS=local:${REDIS_HOST}:6379
     ports:
       - "8081:8081"
+    networks:
+      - app-network
+
 
   minio:
     image: minio/minio:latest
@@ -56,6 +63,8 @@ services:
       timeout: 20s
       retries: 3
       start_period: 10s
+    networks:
+      - app-network
 
   text_producer:
     build:
@@ -81,6 +90,8 @@ services:
       - ./utils.py:/app/utils.py
       - ./requirements.txt:/app/requirements.txt
     command: ["python", "/app/text_producer.py"]
+    networks:
+      - app-network
 
   voice_producer:
     build:
@@ -107,6 +118,13 @@ services:
       - ./requirements.txt:/app/requirements.txt
       - ./audio_files:/app/audio_files
     command: ["python", "/app/voice_producer.py"]
+    networks:
+      - app-network
 
 volumes:
   minio-data:
+
+networks:
+  app-network:
+    driver: bridge
+
