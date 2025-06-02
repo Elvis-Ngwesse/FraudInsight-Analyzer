@@ -9,7 +9,9 @@ import traceback
 import pyttsx3
 from minio import Minio
 from minio.error import S3Error
+from pydub import AudioSegment
 from utils import generate_customer, generate_dialogue
+import wave
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
@@ -45,17 +47,44 @@ tts_engine = pyttsx3.init()
 tts_engine.setProperty('rate', 150)   # speaking speed
 tts_engine.setProperty('volume', 1.0) # volume (0.0 to 1.0)
 
-# --- TTS with retry and exponential backoff ---
+def get_wav_duration(path):
+    with wave.open(path, 'rb') as wf:
+        frames = wf.getnframes()
+        rate = wf.getframerate()
+        duration = frames / float(rate)
+    return duration
+
+# --- TTS with retry, normalization, and wait ---
 def text_to_speech_file_to_temp(text):
     delay = RETRY_DELAY
     for attempt in range(1, MAX_RETRIES + 1):
         try:
             with tempfile.NamedTemporaryFile(delete=False, suffix='.wav') as tmp_file:
                 temp_path = tmp_file.name
+
             tts_engine.save_to_file(text, temp_path)
             tts_engine.runAndWait()
-            logging.info(f"TTS generated and saved to {temp_path}")
+
+            # Wait up to 5 seconds to ensure file is fully written
+            timeout = 5
+            for _ in range(timeout):
+                if os.path.exists(temp_path) and os.path.getsize(temp_path) > 0:
+                    break
+                time.sleep(1)
+            else:
+                raise RuntimeError("TTS output file is empty after wait")
+
+            # Normalize WAV to 16kHz mono 16-bit PCM (Whisper expects this)
+            audio = AudioSegment.from_file(temp_path)
+            audio = audio.set_frame_rate(16000).set_channels(1).set_sample_width(2)
+            audio.export(temp_path, format="wav")
+
+            duration = get_wav_duration(temp_path)
+            filesize = os.path.getsize(temp_path)
+            logging.info(f"TTS generated and normalized WAV saved to {temp_path} "
+                         f"(duration: {duration:.2f}s, size: {filesize} bytes)")
             return temp_path
+
         except Exception as e:
             logging.error(f"TTS generation failed on attempt {attempt}/{MAX_RETRIES}: {e}")
             if attempt == MAX_RETRIES:
@@ -124,6 +153,12 @@ def main():
         try:
             customer = generate_customer()
             complaint_text = generate_dialogue()
+
+            # Check for empty or very short complaint text to avoid TTS empty audio
+            if not complaint_text or len(complaint_text.strip()) < 10:
+                logging.warning(f"Skipping iteration {i+1} due to empty or too short complaint text.")
+                continue
+
             timestamp = time.time()
             message_id = f"voice-{customer['id']}-{int(timestamp)}"
             minio_object_name = f"{message_id}.wav"   # note .wav extension
@@ -136,7 +171,9 @@ def main():
                 if not temp_audio_path:
                     logging.error(f"Skipping message {message_id} due to TTS failure")
                     continue
+
                 upload_success = upload_file_to_minio(temp_audio_path, MINIO_BUCKET, minio_object_name)
+
             finally:
                 if temp_audio_path and os.path.exists(temp_audio_path):
                     os.remove(temp_audio_path)
@@ -149,7 +186,7 @@ def main():
                 "message_id": message_id,
                 "customer": customer,
                 "timestamp": timestamp,
-                "object_name": minio_object_name  # <-- send object_name here
+                "object_name": minio_object_name
             }
 
             if not publish_message(channel, message):

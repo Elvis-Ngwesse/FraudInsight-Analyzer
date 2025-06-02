@@ -3,3 +3,4 @@ redis
 pyttsx3
 minio
 faker
+pydub

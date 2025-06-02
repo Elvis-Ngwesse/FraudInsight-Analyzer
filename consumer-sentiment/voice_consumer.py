@@ -1,74 +1,86 @@
 import pika
 import json
 import os
-import redis
 import logging
 import tempfile
+import wave
+import time
+import traceback
 from minio import Minio
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 import whisper
-import wave
+from influxdb_client import InfluxDBClient, Point, WritePrecision
 
 logging.basicConfig(level=logging.INFO)
 
-# --- Env vars ---
-RABBITMQ_HOST = os.getenv("RABBITMQ_HOST", "rabbitmq")
-REDIS_HOST = os.getenv("REDIS_HOST", "redis")
-REDIS_PORT = int(os.getenv("REDIS_PORT", 6379))
-QUEUE_NAME = 'voice_complaints'
+# Config from env
+RABBITMQ_HOST = os.getenv("RABBITMQ_HOST", "localhost")
+RABBITMQ_PORT = int(os.getenv("RABBITMQ_PORT", 5672))
+RABBITMQ_USER = os.getenv("RABBITMQ_USER", "guest")
+RABBITMQ_PASS = os.getenv("RABBITMQ_PASS", "guest")
+RABBITMQ_VHOST = os.getenv("RABBITMQ_VHOST", "/")
+QUEUE_NAME = "voice_complaints"
 
 MINIO_ENDPOINT = os.getenv("MINIO_ENDPOINT", "minio:9000")
 MINIO_ACCESS_KEY = os.getenv("MINIO_ACCESS_KEY", "minioadmin")
 MINIO_SECRET_KEY = os.getenv("MINIO_SECRET_KEY", "minioadmin")
 MINIO_BUCKET = os.getenv("MINIO_BUCKET", "audiofiles")
 
-# --- Clients ---
-redis_client = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, db=0)
-minio_client = Minio(MINIO_ENDPOINT, access_key=MINIO_ACCESS_KEY, secret_key=MINIO_SECRET_KEY, secure=False)
-whisper_model = whisper.load_model("base")
+INFLUXDB_URL = os.getenv("INFLUXDB_URL", "http://localhost:8086")
+INFLUXDB_ORG = os.getenv("INFLUXDB_ORG", "org")
+INFLUXDB_BUCKET = os.getenv("INFLUXDB_BUCKET", "voice_bucket")
+INFLUXDB_TOKEN = os.getenv("INFLUXDB_TOKEN", "3sZtR4jo135hOcs0i-kPakmTyGToy9LmfKk0JXtZZ7ghzcsIsIm-jGJvvFvmOXz3A0u7v6sVziTAHx36bvp2cg==")  # Add your token here
+
+MAX_RETRIES = 5
+RETRY_DELAY = 5  # seconds initial delay
+HEARTBEAT_INTERVAL = 60  # seconds
+
+minio_client = Minio(
+    MINIO_ENDPOINT,
+    access_key=MINIO_ACCESS_KEY,
+    secret_key=MINIO_SECRET_KEY,
+    secure=False,
+)
+
 analyzer = SentimentIntensityAnalyzer()
+whisper_model = whisper.load_model("base")
 
+# Create InfluxDB client once, reuse
+influx_client = InfluxDBClient(url=INFLUXDB_URL, token=INFLUXDB_TOKEN, org=INFLUXDB_ORG)
+write_api = influx_client.write_api(write_precision=WritePrecision.NS)
 
-def download_audio_from_minio(object_name):
-    """
-    Downloads the audio file from MinIO and returns the local temporary file path.
-    """
+def download_audio(object_name):
     try:
         with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp_file:
             minio_client.fget_object(MINIO_BUCKET, object_name, tmp_file.name)
-            logging.info(f"Downloaded audio file from MinIO: {object_name} -> {tmp_file.name}")
+            logging.info(f"Downloaded audio: {object_name} -> {tmp_file.name}")
 
-            # Check if file is empty
-            file_size = os.path.getsize(tmp_file.name)
-            if file_size == 0:
-                raise Exception("Downloaded file is empty (0 bytes)")
+            if os.path.getsize(tmp_file.name) == 0:
+                raise Exception("Downloaded file is empty")
 
-            # Validate WAV format by opening with wave module
             try:
-                with wave.open(tmp_file.name, 'rb') as wav_file:
-                    logging.info(f"WAV file parameters: channels={wav_file.getnchannels()}, "
-                                 f"framerate={wav_file.getframerate()}, "
-                                 f"frames={wav_file.getnframes()}")
+                with wave.open(tmp_file.name, "rb") as wav_file:
+                    logging.info(f"WAV params: channels={wav_file.getnchannels()}, "
+                                 f"framerate={wav_file.getframerate()}, frames={wav_file.getnframes()}")
             except wave.Error as e:
                 raise Exception(f"Invalid WAV file: {e}")
 
             return tmp_file.name
     except Exception as e:
-        raise Exception(f"Failed to download or validate audio from MinIO: {e}")
-
+        raise Exception(f"Download or validation failed: {e}")
 
 def callback(ch, method, properties, body):
+    audio_path = None
     try:
         message = json.loads(body)
         message_id = message.get("message_id", "unknown")
         object_name = message.get("object_name")
 
         if not object_name:
-            raise ValueError(f"Message {message_id} missing 'object_name' field.")
+            raise ValueError(f"Message {message_id} missing 'object_name' field")
 
-        audio_path = download_audio_from_minio(object_name)
+        audio_path = download_audio(object_name)
 
-        # Transcribe audio
         result = whisper_model.transcribe(audio_path)
         transcript = result.get("text", "").strip()
         logging.info(f"Transcript for {message_id}: '{transcript}'")
@@ -79,36 +91,67 @@ def callback(ch, method, properties, body):
         sentiment = analyzer.polarity_scores(transcript)
         logging.info(f"Sentiment for {message_id}: {sentiment}")
 
-        # Save analysis in Redis
-        redis_key = f"analysis:{message_id}"
-        redis_client.hset(redis_key, mapping={
-            "transcript": transcript,
-            "sentiment_neg": sentiment['neg'],
-            "sentiment_neu": sentiment['neu'],
-            "sentiment_pos": sentiment['pos'],
-            "sentiment_compound": sentiment['compound']
-        })
-
-        # Clean up temporary audio file
-        os.remove(audio_path)
+        point = (
+            Point("voice_complaints")
+            .tag("message_id", message_id)
+            .field("transcript", transcript)
+            .field("neg", sentiment["neg"])
+            .field("neu", sentiment["neu"])
+            .field("pos", sentiment["pos"])
+            .field("compound", sentiment["compound"])
+        )
+        write_api.write(bucket=INFLUXDB_BUCKET, record=point)
 
         ch.basic_ack(delivery_tag=method.delivery_tag)
 
-    except Exception as e:
-        logging.error(f"Failed to process message: {e}")
-        # Nack and discard message (no requeue)
+    except Exception:
+        logging.error(f"Failed to process message:\n{traceback.format_exc()}")
         ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)
+    finally:
+        if audio_path and os.path.exists(audio_path):
+            try:
+                os.remove(audio_path)
+            except Exception as e:
+                logging.warning(f"Could not remove temp audio file {audio_path}: {e}")
 
+def connect_to_rabbitmq():
+    delay = RETRY_DELAY
+    parameters = pika.ConnectionParameters(
+        host=RABBITMQ_HOST,
+        port=RABBITMQ_PORT,
+        virtual_host=RABBITMQ_VHOST,
+        credentials=pika.PlainCredentials(RABBITMQ_USER, RABBITMQ_PASS),
+        heartbeat=HEARTBEAT_INTERVAL,
+        blocked_connection_timeout=300,
+        connection_attempts=MAX_RETRIES,
+        retry_delay=RETRY_DELAY,
+    )
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            logging.info(f"Connecting to RabbitMQ at {RABBITMQ_HOST}:{RABBITMQ_PORT} (attempt {attempt})")
+            connection = pika.BlockingConnection(parameters)
+            logging.info("Connected to RabbitMQ.")
+            return connection
+        except pika.exceptions.AMQPConnectionError as e:
+            logging.warning(f"RabbitMQ not ready: {e}. Retrying in {delay}s...")
+            time.sleep(delay)
+            delay = min(delay * 2, 60)
+    raise ConnectionError(f"Could not connect to RabbitMQ at {RABBITMQ_HOST} after {MAX_RETRIES} attempts")
 
 def main():
-    conn = pika.BlockingConnection(pika.ConnectionParameters(host=RABBITMQ_HOST))
-    channel = conn.channel()
+    connection = connect_to_rabbitmq()
+    channel = connection.channel()
     channel.queue_declare(queue=QUEUE_NAME, durable=True)
     channel.basic_qos(prefetch_count=1)
     channel.basic_consume(queue=QUEUE_NAME, on_message_callback=callback)
-    logging.info(" [*] Waiting for voice messages. To exit press CTRL+C")
-    channel.start_consuming()
-
+    logging.info("Waiting for voice complaints...")
+    try:
+        channel.start_consuming()
+    except KeyboardInterrupt:
+        logging.info("Interrupted by user, shutting down...")
+    finally:
+        connection.close()
+        influx_client.close()
 
 if __name__ == "__main__":
     main()

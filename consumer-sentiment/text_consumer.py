@@ -1,24 +1,26 @@
-import pika, json, os, redis, logging, time
+import pika
+import json
+import os
+import logging
+import traceback
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
+from influxdb_client import InfluxDBClient, Point, WritePrecision
 
 logging.basicConfig(level=logging.INFO)
 
-# --- Config ---
+# Config from env vars
 RABBITMQ_HOST = os.getenv("RABBITMQ_HOST", "localhost")
 RABBITMQ_PORT = int(os.getenv("RABBITMQ_PORT", 5672))
 RABBITMQ_USER = os.getenv("RABBITMQ_USER", "guest")
 RABBITMQ_PASS = os.getenv("RABBITMQ_PASS", "guest")
 RABBITMQ_VHOST = os.getenv("RABBITMQ_VHOST", "/")
-QUEUE_NAME = 'text_complaints'
+QUEUE_NAME = "text_complaints"
 
-REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
-REDIS_PORT = int(os.getenv("REDIS_PORT", 6379))
+INFLUXDB_URL = os.getenv("INFLUXDB_URL", "http://localhost:8086")
+INFLUXDB_ORG = os.getenv("INFLUXDB_ORG", "org")
+INFLUXDB_BUCKET = os.getenv("INFLUXDB_BUCKET", "text_bucket")
+INFLUXDB_TOKEN = os.getenv("INFLUXDB_TOKEN", "3sZtR4jo135hOcs0i-kPakmTyGToy9LmfKk0JXtZZ7ghzcsIsIm-jGJvvFvmOXz3A0u7v6sVziTAHx36bvp2cg==")  # <- Add your token here
 
-MAX_RETRIES = 10
-RETRY_DELAY = 5  # seconds
-HEARTBEAT_INTERVAL = 120  # seconds
-
-# --- Setup ---
 analyzer = SentimentIntensityAnalyzer()
 
 def connect_to_rabbitmq():
@@ -27,35 +29,9 @@ def connect_to_rabbitmq():
         host=RABBITMQ_HOST,
         port=RABBITMQ_PORT,
         virtual_host=RABBITMQ_VHOST,
-        credentials=credentials,
-        heartbeat=HEARTBEAT_INTERVAL,
-        blocked_connection_timeout=300,
-        connection_attempts=MAX_RETRIES,
-        retry_delay=RETRY_DELAY
+        credentials=credentials
     )
-    for attempt in range(MAX_RETRIES):
-        try:
-            logging.info(f"Connecting to RabbitMQ at {RABBITMQ_HOST} (attempt {attempt + 1})")
-            connection = pika.BlockingConnection(parameters)
-            logging.info("Connected to RabbitMQ.")
-            return connection
-        except pika.exceptions.AMQPConnectionError as e:
-            logging.warning(f"RabbitMQ not ready: {e}")
-            time.sleep(RETRY_DELAY)
-    raise Exception("Failed to connect to RabbitMQ after retries.")
-
-def connect_to_redis():
-    for attempt in range(MAX_RETRIES):
-        try:
-            logging.info(f"Connecting to Redis at {REDIS_HOST}:{REDIS_PORT} (attempt {attempt + 1})")
-            redis_client = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, db=0)
-            redis_client.ping()
-            logging.info("Connected to Redis.")
-            return redis_client
-        except redis.exceptions.ConnectionError as e:
-            logging.warning(f"Redis not ready: {e}")
-            time.sleep(RETRY_DELAY)
-    raise Exception("Failed to connect to Redis after retries.")
+    return pika.BlockingConnection(parameters)
 
 def callback(ch, method, properties, body):
     try:
@@ -64,32 +40,51 @@ def callback(ch, method, properties, body):
         message_id = message.get("message_id", "unknown")
 
         sentiment = analyzer.polarity_scores(text)
-        redis_key = f"analysis:{message_id}"
-        redis_client.hset(redis_key, mapping={
-            "text": text,
-            "sentiment_neg": sentiment['neg'],
-            "sentiment_neu": sentiment['neu'],
-            "sentiment_pos": sentiment['pos'],
-            "sentiment_compound": sentiment['compound']
-        })
 
-        logging.info(f"Analyzed text complaint {message_id} | Compound: {sentiment['compound']}")
+        # Write to InfluxDB
+        point = (
+            Point("text_complaints")
+            .tag("message_id", message_id)
+            .field("neg", sentiment["neg"])
+            .field("neu", sentiment["neu"])
+            .field("pos", sentiment["pos"])
+            .field("compound", sentiment["compound"])
+        )
+        if isinstance(text, str) and len(text) < 1024:
+            point = point.field("text", text)
+        else:
+            logging.warning(f"Complaint text too long or invalid for message {message_id}, skipping 'text' field")
+
+        write_api.write(bucket=INFLUXDB_BUCKET, record=point)
+
+        logging.info(f"Processed text complaint {message_id} | Compound: {sentiment['compound']}")
         ch.basic_ack(delivery_tag=method.delivery_tag)
-    except Exception as e:
-        logging.error(f"Failed to process message: {e}")
+
+    except Exception:
+        logging.error("Failed to process message:\n" + traceback.format_exc())
         ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)
 
 def main():
-    global redis_client
-    rabbit_conn = connect_to_rabbitmq()
-    redis_client = connect_to_redis()
+    global write_api  # make available inside callback
 
-    channel = rabbit_conn.channel()
+    conn = connect_to_rabbitmq()
+    channel = conn.channel()
     channel.queue_declare(queue=QUEUE_NAME, durable=True)
     channel.basic_qos(prefetch_count=1)
+
+    influx_client = InfluxDBClient(url=INFLUXDB_URL, token=INFLUXDB_TOKEN, org=INFLUXDB_ORG)
+    global write_api
+    write_api = influx_client.write_api(write_precision=WritePrecision.NS)
+
     channel.basic_consume(queue=QUEUE_NAME, on_message_callback=callback)
-    logging.info(" [*] Waiting for text messages. To exit press CTRL+C")
-    channel.start_consuming()
+    logging.info("Waiting for text complaints...")
+    try:
+        channel.start_consuming()
+    except KeyboardInterrupt:
+        logging.info("Interrupted by user, shutting down...")
+    finally:
+        influx_client.close()
+        conn.close()
 
 if __name__ == "__main__":
     main()

@@ -1,4 +1,47 @@
+version: "3.8"
+
 services:
+  influxdb:
+    image: influxdb:2.6
+    ports:
+      - "8086:8086"
+    volumes:
+      - influxdb-storage:/var/lib/influxdb2
+    environment:
+      - DOCKER_INFLUXDB_INIT_MODE=setup
+      - DOCKER_INFLUXDB_INIT_USERNAME=admin
+      - DOCKER_INFLUXDB_INIT_PASSWORD=admin123
+      - DOCKER_INFLUXDB_INIT_ORG=org
+      - DOCKER_INFLUXDB_INIT_BUCKET=text_bucket, voice_bucket
+      - DOCKER_INFLUXDB_INIT_ADMIN_TOKEN=3sZtR4jo135hOcs0i-kPakmTyGToy9LmfKk0JXtZZ7ghzcsIsIm-jGJvvFvmOXz3A0u7v6sVziTAHx36bvp2cg==
+    networks:
+      - producer_app-network
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana-storage:/var/lib/grafana
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    networks:
+      - producer_app-network
+    restart: unless-stopped
+
+  metabase:
+    image: metabase/metabase
+    platform: linux/amd64
+    ports:
+      - "3001:3000"
+    volumes:
+      - metabase-data:/metabase-data
+    networks:
+      - producer_app-network
+    restart: unless-stopped
+
   text_consumer:
     build:
       context: .
@@ -9,14 +52,18 @@ services:
       - RABBITMQ_USER=guest
       - RABBITMQ_PASS=guest
       - RABBITMQ_VHOST=/
-      - REDIS_HOST=redis
-      - REDIS_PORT=6379
+      - INFLUXDB_URL=http://influxdb:8086
+      - INFLUXDB_ORG=org
+      - INFLUXDB_BUCKET=text_bucket
     volumes:
-      - ./text_consumer.py:/app/text_consumer.py
-      - ./requirements.txt:/app/requirements.txt
+      - ./text_consumer.py:/app/text_consumer.py:ro
+      - ./requirements.txt:/app/requirements.txt:ro
     command: ["python", "/app/text_consumer.py"]
     networks:
       - producer_app-network
+    depends_on:
+      - influxdb
+    restart: unless-stopped
 
   voice_consumer:
     build:
@@ -24,44 +71,26 @@ services:
       dockerfile: Dockerfile
     environment:
       - RABBITMQ_HOST=rabbitmq
-      - REDIS_HOST=redis
-      - REDIS_PORT=6379
-      - MINIO_ENDPOINT=minio:9000
-      - MINIO_ACCESS_KEY=minioadmin
-      - MINIO_SECRET_KEY=minioadmin
-      - MINIO_BUCKET=audiofiles
       - RABBITMQ_PORT=5672
       - RABBITMQ_USER=guest
       - RABBITMQ_PASS=guest
       - RABBITMQ_VHOST=/
+      - INFLUXDB_URL=http://influxdb:8086
+      - INFLUXDB_ORG=org
+      - INFLUXDB_BUCKET=voice_bucket
+      - MINIO_ENDPOINT=minio:9000
+      - MINIO_ACCESS_KEY=minioadmin
+      - MINIO_SECRET_KEY=minioadmin
+      - MINIO_BUCKET=audiofiles
     volumes:
-      - ./voice_consumer.py:/app/voice_consumer.py
-      - ./requirements.txt:/app/requirements.txt
+      - ./voice_consumer.py:/app/voice_consumer.py:ro
+      - ./requirements.txt:/app/requirements.txt:ro
     command: ["python", "/app/voice_consumer.py"]
     networks:
       - producer_app-network
-
-  grafana:
-    image: grafana/grafana
-    ports:
-      - "3000:3000"
-    networks:
-      - producer_app-network
-    volumes:
-      - grafana-storage:/var/lib/grafana
-    environment:
-      - GF_SECURITY_ADMIN_USER=admin
-      - GF_SECURITY_ADMIN_PASSWORD=admin
-
-  metabase:
-    image: metabase/metabase:latest
-    platform: linux/amd64
-    ports:
-      - "3001:3000"
-    volumes:
-      - metabase-data:/metabase-data
-    networks:
-      - producer_app-network
+    depends_on:
+      - influxdb
+    restart: unless-stopped
 
 networks:
   producer_app-network:
@@ -70,3 +99,4 @@ networks:
 volumes:
   grafana-storage:
   metabase-data:
+  influxdb-storage:
