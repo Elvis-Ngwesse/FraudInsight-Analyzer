@@ -11,7 +11,7 @@ from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 import whisper
 from influxdb_client import InfluxDBClient, Point, WritePrecision
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
 
 # Config from env
 RABBITMQ_HOST = os.getenv("RABBITMQ_HOST", "localhost")
@@ -29,10 +29,10 @@ MINIO_BUCKET = os.getenv("MINIO_BUCKET", "audiofiles")
 INFLUXDB_URL = os.getenv("INFLUXDB_URL", "http://localhost:8086")
 INFLUXDB_ORG = os.getenv("INFLUXDB_ORG", "org")
 INFLUXDB_BUCKET = os.getenv("INFLUXDB_BUCKET", "voice_bucket")
-INFLUXDB_TOKEN = os.getenv("INFLUXDB_TOKEN", "3sZtR4jo135hOcs0i-kPakmTyGToy9LmfKk0JXtZZ7ghzcsIsIm-jGJvvFvmOXz3A0u7v6sVziTAHx36bvp2cg==")  # Add your token here
+INFLUXDB_TOKEN = os.getenv("INFLUXDB_TOKEN", "iQR2Im5uSfaAYysoyyk8qfSV2N473QPh5231vEigm6dsg7CG2SOURDMv2BWBrZhjc0oGNswwANqG-glEz_UnXA==")
 
 MAX_RETRIES = 5
-RETRY_DELAY = 5  # seconds initial delay
+RETRY_DELAY = 5  # seconds
 HEARTBEAT_INTERVAL = 60  # seconds
 
 minio_client = Minio(
@@ -45,12 +45,26 @@ minio_client = Minio(
 analyzer = SentimentIntensityAnalyzer()
 whisper_model = whisper.load_model("base")
 
-# Create InfluxDB client once, reuse
 influx_client = InfluxDBClient(url=INFLUXDB_URL, token=INFLUXDB_TOKEN, org=INFLUXDB_ORG)
 write_api = influx_client.write_api(write_precision=WritePrecision.NS)
 
+
+def ensure_bucket_exists(client, bucket_name, org):
+    buckets_api = client.buckets_api()
+    existing_buckets = buckets_api.find_buckets().buckets
+    if any(bucket.name == bucket_name for bucket in existing_buckets):
+        logging.info(f"Bucket '{bucket_name}' already exists.")
+    else:
+        logging.info(f"Bucket '{bucket_name}' not found. Creating it...")
+        buckets_api.create_bucket(bucket_name=bucket_name, org=org)
+        logging.info(f"Bucket '{bucket_name}' created.")
+
+
 def download_audio(object_name):
     try:
+        stat = minio_client.stat_object(MINIO_BUCKET, object_name)
+        logging.info(f"Object '{object_name}' found in MinIO bucket '{MINIO_BUCKET}', size: {stat.size} bytes")
+
         with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp_file:
             minio_client.fget_object(MINIO_BUCKET, object_name, tmp_file.name)
             logging.info(f"Downloaded audio: {object_name} -> {tmp_file.name}")
@@ -58,21 +72,22 @@ def download_audio(object_name):
             if os.path.getsize(tmp_file.name) == 0:
                 raise Exception("Downloaded file is empty")
 
-            try:
-                with wave.open(tmp_file.name, "rb") as wav_file:
-                    logging.info(f"WAV params: channels={wav_file.getnchannels()}, "
-                                 f"framerate={wav_file.getframerate()}, frames={wav_file.getnframes()}")
-            except wave.Error as e:
-                raise Exception(f"Invalid WAV file: {e}")
+            with wave.open(tmp_file.name, "rb") as wav_file:
+                logging.info(f"WAV params: channels={wav_file.getnchannels()}, "
+                             f"framerate={wav_file.getframerate()}, frames={wav_file.getnframes()}")
 
             return tmp_file.name
     except Exception as e:
         raise Exception(f"Download or validation failed: {e}")
 
+
 def callback(ch, method, properties, body):
     audio_path = None
     try:
+        logging.info(f"Received message from queue '{QUEUE_NAME}': {body}")
         message = json.loads(body)
+        logging.info(f"Message JSON parsed: {message}")
+
         message_id = message.get("message_id", "unknown")
         object_name = message.get("object_name")
 
@@ -82,6 +97,8 @@ def callback(ch, method, properties, body):
         audio_path = download_audio(object_name)
 
         result = whisper_model.transcribe(audio_path)
+        logging.info(f"Whisper transcription result: {result}")
+
         transcript = result.get("text", "").strip()
         logging.info(f"Transcript for {message_id}: '{transcript}'")
 
@@ -100,7 +117,12 @@ def callback(ch, method, properties, body):
             .field("pos", sentiment["pos"])
             .field("compound", sentiment["compound"])
         )
-        write_api.write(bucket=INFLUXDB_BUCKET, record=point)
+
+        try:
+            write_api.write(bucket=INFLUXDB_BUCKET, record=point)
+            logging.info(f"Written point to InfluxDB: {point}")
+        except Exception as e:
+            logging.error(f"InfluxDB write failed: {e}")
 
         ch.basic_ack(delivery_tag=method.delivery_tag)
 
@@ -111,8 +133,10 @@ def callback(ch, method, properties, body):
         if audio_path and os.path.exists(audio_path):
             try:
                 os.remove(audio_path)
+                logging.info(f"Deleted temporary audio file: {audio_path}")
             except Exception as e:
                 logging.warning(f"Could not remove temp audio file {audio_path}: {e}")
+
 
 def connect_to_rabbitmq():
     delay = RETRY_DELAY
@@ -138,7 +162,10 @@ def connect_to_rabbitmq():
             delay = min(delay * 2, 60)
     raise ConnectionError(f"Could not connect to RabbitMQ at {RABBITMQ_HOST} after {MAX_RETRIES} attempts")
 
+
 def main():
+    ensure_bucket_exists(influx_client, INFLUXDB_BUCKET, INFLUXDB_ORG)
+
     connection = connect_to_rabbitmq()
     channel = connection.channel()
     channel.queue_declare(queue=QUEUE_NAME, durable=True)
@@ -152,6 +179,7 @@ def main():
     finally:
         connection.close()
         influx_client.close()
+
 
 if __name__ == "__main__":
     main()

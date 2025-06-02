@@ -13,7 +13,7 @@ services:
       - DOCKER_INFLUXDB_INIT_PASSWORD=admin123
       - DOCKER_INFLUXDB_INIT_ORG=org
       - DOCKER_INFLUXDB_INIT_BUCKET=text_bucket, voice_bucket
-      - DOCKER_INFLUXDB_INIT_ADMIN_TOKEN=3sZtR4jo135hOcs0i-kPakmTyGToy9LmfKk0JXtZZ7ghzcsIsIm-jGJvvFvmOXz3A0u7v6sVziTAHx36bvp2cg==
+      - DOCKER_INFLUXDB_INIT_ADMIN_TOKEN=iQR2Im5uSfaAYysoyyk8qfSV2N473QPh5231vEigm6dsg7CG2SOURDMv2BWBrZhjc0oGNswwANqG-glEz_UnXA==
     networks:
       - producer_app-network
     restart: unless-stopped

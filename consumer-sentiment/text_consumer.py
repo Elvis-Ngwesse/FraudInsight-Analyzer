@@ -19,9 +19,19 @@ QUEUE_NAME = "text_complaints"
 INFLUXDB_URL = os.getenv("INFLUXDB_URL", "http://localhost:8086")
 INFLUXDB_ORG = os.getenv("INFLUXDB_ORG", "org")
 INFLUXDB_BUCKET = os.getenv("INFLUXDB_BUCKET", "text_bucket")
-INFLUXDB_TOKEN = os.getenv("INFLUXDB_TOKEN", "3sZtR4jo135hOcs0i-kPakmTyGToy9LmfKk0JXtZZ7ghzcsIsIm-jGJvvFvmOXz3A0u7v6sVziTAHx36bvp2cg==")  # <- Add your token here
+INFLUXDB_TOKEN = os.getenv("INFLUXDB_TOKEN", "iQR2Im5uSfaAYysoyyk8qfSV2N473QPh5231vEigm6dsg7CG2SOURDMv2BWBrZhjc0oGNswwANqG-glEz_UnXA==")
 
 analyzer = SentimentIntensityAnalyzer()
+
+def ensure_bucket_exists(client, bucket_name, org):
+    buckets_api = client.buckets_api()
+    existing_buckets = buckets_api.find_buckets().buckets
+    if any(bucket.name == bucket_name for bucket in existing_buckets):
+        logging.info(f"Bucket '{bucket_name}' already exists.")
+    else:
+        logging.info(f"Bucket '{bucket_name}' not found. Creating it...")
+        buckets_api.create_bucket(bucket_name=bucket_name, org=org)
+        logging.info(f"Bucket '{bucket_name}' created.")
 
 def connect_to_rabbitmq():
     credentials = pika.PlainCredentials(RABBITMQ_USER, RABBITMQ_PASS)
@@ -67,16 +77,16 @@ def callback(ch, method, properties, body):
 def main():
     global write_api  # make available inside callback
 
+    influx_client = InfluxDBClient(url=INFLUXDB_URL, token=INFLUXDB_TOKEN, org=INFLUXDB_ORG)
+    ensure_bucket_exists(influx_client, INFLUXDB_BUCKET, INFLUXDB_ORG)
+    write_api = influx_client.write_api(write_precision=WritePrecision.NS)
+
     conn = connect_to_rabbitmq()
     channel = conn.channel()
     channel.queue_declare(queue=QUEUE_NAME, durable=True)
     channel.basic_qos(prefetch_count=1)
-
-    influx_client = InfluxDBClient(url=INFLUXDB_URL, token=INFLUXDB_TOKEN, org=INFLUXDB_ORG)
-    global write_api
-    write_api = influx_client.write_api(write_precision=WritePrecision.NS)
-
     channel.basic_consume(queue=QUEUE_NAME, on_message_callback=callback)
+
     logging.info("Waiting for text complaints...")
     try:
         channel.start_consuming()
