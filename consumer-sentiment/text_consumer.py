@@ -5,8 +5,8 @@ import logging
 import traceback
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 from influxdb_client import InfluxDBClient, Point, WritePrecision
-logging.basicConfig(level=logging.INFO)
 
+logging.basicConfig(level=logging.INFO)
 
 def get_env_var(name):
     value = os.getenv(name)
@@ -19,12 +19,13 @@ RABBITMQ_PORT = int(get_env_var("RABBITMQ_PORT"))
 RABBITMQ_USER = get_env_var("RABBITMQ_USER")
 RABBITMQ_PASS = get_env_var("RABBITMQ_PASS")
 RABBITMQ_VHOST = get_env_var("RABBITMQ_VHOST")
-QUEUE_NAME = "text_complaints"  # if you want this fixed, else env too
+QUEUE_NAME = "text_complaints"
 
 INFLUXDB_URL_LOCAL = get_env_var("INFLUXDB_URL")
 INFLUXDB_ORG = get_env_var("INFLUXDB_ORG")
 INFLUXDB_BUCKET_TEXT = get_env_var("INFLUXDB_BUCKET")
 INFLUXDB_TOKEN = get_env_var("INFLUXDB_TOKEN")
+
 analyzer = SentimentIntensityAnalyzer()
 
 def ensure_bucket_exists(client, bucket_name, org):
@@ -55,7 +56,6 @@ def callback(ch, method, properties, body):
 
         sentiment = analyzer.polarity_scores(text)
 
-        # Write to InfluxDB
         point = (
             Point("text_complaints")
             .tag("message_id", message_id)
@@ -79,7 +79,7 @@ def callback(ch, method, properties, body):
         ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)
 
 def main():
-    global write_api  # make available inside callback
+    global write_api
 
     influx_client = InfluxDBClient(url=INFLUXDB_URL_LOCAL, token=INFLUXDB_TOKEN, org=INFLUXDB_ORG)
     ensure_bucket_exists(influx_client, INFLUXDB_BUCKET_TEXT, INFLUXDB_ORG)
@@ -87,7 +87,8 @@ def main():
 
     conn = connect_to_rabbitmq()
     channel = conn.channel()
-    channel.queue_declare(queue=QUEUE_NAME, durable=True)
+
+    # Removed queue_declare to avoid argument conflicts
     channel.basic_qos(prefetch_count=1)
     channel.basic_consume(queue=QUEUE_NAME, on_message_callback=callback)
 

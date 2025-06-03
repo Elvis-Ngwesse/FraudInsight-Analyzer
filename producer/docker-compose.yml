@@ -126,6 +126,49 @@ services:
     networks:
       - app-network
 
+  voice_dlq_consumer:
+    container_name: voice_dlq_consumer
+    build:
+      context: ./dlq
+      dockerfile: ../Dockerfile
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      - RABBITMQ_HOST=${RABBITMQ_HOST}
+      - REDIS_HOST=${REDIS_HOST}
+      - REDIS_PORT=${REDIS_PORT}
+    volumes:
+      - ./dlq/voice_dlq_consumer.py:/app/voice_dlq_consumer.py
+      - ./dlq/requirements.txt:/app/requirements.txt
+    command: [ "python", "/app/voice_dlq_consumer.py" ]
+    networks:
+      - app-network
+
+  text_dlq_consumer:
+    container_name: text_dlq_consumer
+    build:
+      context: ./dlq
+      dockerfile: ../Dockerfile
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      - RABBITMQ_HOST=${RABBITMQ_HOST}
+      - REDIS_HOST=${REDIS_HOST}
+      - REDIS_PORT=${REDIS_PORT}
+    volumes:
+      - ./dlq/text_dlq_consumer.py:/app/text_dlq_consumer.py
+      - ./dlq/requirements.txt:/app/requirements.txt
+    command: [ "python", "/app/text_dlq_consumer.py" ]
+    networks:
+      - app-network
+
+
 volumes:
   minio-data:
 

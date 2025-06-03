@@ -28,11 +28,12 @@ MINIO_SECRET_KEY = os.getenv("MINIO_SECRET_KEY")
 MINIO_BUCKET = os.getenv("MINIO_BUCKET")
 
 REDIS_HOST_LOCAL = os.getenv("REDIS_HOST")
-REDIS_PORT = os.getenv("REDIS_PORT")
+REDIS_PORT = int(os.getenv("REDIS_PORT", 6379))
 
 MAX_RETRIES = 10
 RETRY_DELAY = 2
-MESSAGE_LENGHT=40
+MESSAGE_LENGHT = 30
+
 # MinIO (S3-compatible) client setup
 s3 = boto3.client(
     "s3",
@@ -88,8 +89,11 @@ def connect_to_rabbitmq():
         try:
             logging.info(f"[RabbitMQ] Connecting to {RABBITMQ_HOST} (attempt {attempt + 1})")
             connection = pika.BlockingConnection(pika.ConnectionParameters(host=RABBITMQ_HOST))
+            channel = connection.channel()
             logging.info("[RabbitMQ] Connection established")
-            return connection.channel()
+            # Declare voice_complaints queue with no DLQ or exchanges
+            channel.queue_declare(queue=VOICE_QUEUE, durable=True)
+            return channel
         except pika.exceptions.AMQPConnectionError:
             logging.warning("[RabbitMQ] Connection failed, retrying in 2s")
             time.sleep(2)
@@ -138,8 +142,6 @@ def generate_and_upload_audio(dialogue_lines, audio_id):
 
 def main():
     channel = connect_to_rabbitmq()
-    channel.queue_declare(queue=VOICE_QUEUE, durable=True)
-
     redis_client = connect_to_redis()
 
     scenario_names = ["fraud", "card_issue", "login_problem"]
@@ -150,11 +152,10 @@ def main():
         logging.info(f"[{i + 1}/2000] Creating voice complaint for scenario: '{scenario}', ID: {audio_id}")
 
         dialogue_text = generate_dialogue(MESSAGE_LENGHT)
-        logging.info(f"[Dialogue] Generated 20-line dialogue for scenario: {scenario}")
+        logging.info(f"[Dialogue] Generated {MESSAGE_LENGHT}-line dialogue for scenario: {scenario}")
 
         audio_url = generate_and_upload_audio(dialogue_text.splitlines(), audio_id)
 
-        # Add object_name field here
         object_name = f"{audio_id}.wav"
 
         payload = {
@@ -165,7 +166,6 @@ def main():
             "scenario": scenario,
         }
 
-        # Send to RabbitMQ
         channel.basic_publish(
             exchange="",
             routing_key=VOICE_QUEUE,
@@ -174,7 +174,6 @@ def main():
         )
         logging.info(f"[RabbitMQ] ✅ Pushed complaint to queue '{VOICE_QUEUE}' with ID: {audio_id}")
 
-        # Save to Redis
         redis_key = f"voice:{audio_id}"
         redis_client.set(redis_key, json.dumps(payload))
         logging.info(f"[Redis] 📝 Stored metadata with key: {redis_key}")

@@ -70,7 +70,13 @@ def main():
     redis_client = connect_to_redis()
     rabbit_conn = connect_to_rabbitmq()
     channel = rabbit_conn.channel()
-    channel.queue_declare(queue=QUEUE_NAME, durable=True)
+
+    # Declare queue with DLX argument to match existing queue configuration
+    channel.queue_declare(
+        queue=QUEUE_NAME,
+        durable=True,
+        arguments={'x-dead-letter-exchange': 'text_dlx'}
+    )
 
     for i in range(TOTAL_MESSAGES):
         customer = generate_customer()
@@ -110,7 +116,11 @@ def main():
                 pass
             rabbit_conn = connect_to_rabbitmq()
             channel = rabbit_conn.channel()
-            channel.queue_declare(queue=QUEUE_NAME, durable=True)
+            channel.queue_declare(
+                queue=QUEUE_NAME,
+                durable=True,
+                arguments={'x-dead-letter-exchange': 'text_dlx'}
+            )
             channel.basic_publish(
                 exchange='',
                 routing_key=QUEUE_NAME,

@@ -96,7 +96,6 @@ def callback(ch, method, properties, body):
         message = json.loads(body)
         logging.info(f"Message JSON parsed: {message}")
 
-        # Use 'id' field primarily for message id, fallback to message_id or unknown
         message_id = message.get("id") or message.get("message_id") or "unknown"
         object_name = message.get("object_name")
 
@@ -127,11 +126,8 @@ def callback(ch, method, properties, body):
             .field("compound", sentiment["compound"])
         )
 
-        try:
-            write_api.write(bucket=INFLUXDB_BUCKET_VOICE, record=point)
-            logging.info(f"Written point to InfluxDB: {point}")
-        except Exception as e:
-            logging.error(f"InfluxDB write failed: {e}")
+        write_api.write(bucket=INFLUXDB_BUCKET_VOICE, record=point)
+        logging.info(f"Written point to InfluxDB: {point}")
 
         ch.basic_ack(delivery_tag=method.delivery_tag)
 
@@ -175,19 +171,34 @@ def connect_to_rabbitmq():
 def main():
     ensure_bucket_exists(influx_client, INFLUXDB_BUCKET_VOICE, INFLUXDB_ORG)
 
-    connection = connect_to_rabbitmq()
-    channel = connection.channel()
-    channel.queue_declare(queue=QUEUE_NAME, durable=True)
-    channel.basic_qos(prefetch_count=1)
-    channel.basic_consume(queue=QUEUE_NAME, on_message_callback=callback)
-    logging.info("Waiting for voice complaints...")
-    try:
-        channel.start_consuming()
-    except KeyboardInterrupt:
-        logging.info("Interrupted by user, shutting down...")
-    finally:
-        connection.close()
-        influx_client.close()
+    while True:
+        connection = None
+        try:
+            connection = connect_to_rabbitmq()
+            channel = connection.channel()
+            channel.queue_declare(queue=QUEUE_NAME, durable=True)
+            channel.basic_qos(prefetch_count=1)
+            channel.basic_consume(queue=QUEUE_NAME, on_message_callback=callback)
+
+            logging.info("Waiting for voice complaints...")
+            channel.start_consuming()
+        except pika.exceptions.AMQPConnectionError as e:
+            logging.error(f"Lost RabbitMQ connection: {e}, reconnecting in {RETRY_DELAY} seconds...")
+            time.sleep(RETRY_DELAY)
+        except KeyboardInterrupt:
+            logging.info("Interrupted by user, shutting down...")
+            break
+        except Exception:
+            logging.error(f"Unexpected error:\n{traceback.format_exc()}")
+            time.sleep(RETRY_DELAY)
+        finally:
+            if connection and not connection.is_closed:
+                try:
+                    connection.close()
+                except Exception:
+                    pass
+
+    influx_client.close()
 
 
 if __name__ == "__main__":
