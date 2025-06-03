@@ -60,7 +60,7 @@ def callback(ch, method, properties, body):
             .field("pos", sentiment["pos"])
             .field("compound", sentiment["compound"])
         )
-        if isinstance(text, str) and len(text) < 1024:
+        if isinstance(text, str) and len(text) < 5024:
             point = point.field("text", text)
         else:
             logging.warning(f"Complaint text too long or invalid for message {message_id}, skipping 'text' field")

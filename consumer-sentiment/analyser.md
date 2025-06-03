@@ -36,9 +36,14 @@ from(bucket: "text_bucket")
 influx query '
 from(bucket: "voice_bucket")
 |> range(start: -1h)
-|> filter(fn: (r) => r._measurement == "voice_complaints")
-|> limit(n:10)
-' --org "org" --token "iQR2Im5uSfaAYysoyyk8qfSV2N473QPh5231vEigm6dsg7CG2SOURDMv2BWBrZhjc0oGNswwANqG-glEz_UnXA==" --host http://localhost:8086
+|> filter(fn: (r) => r._measurement == "voice_complaints" and r._field == "compound")
+|> limit(n: 10)
+' --org "org" \
+--token "iQR2Im5uSfaAYysoyyk8qfSV2N473QPh5231vEigm6dsg7CG2SOURDMv2BWBrZhjc0oGNswwANqG-glEz_UnXA==" \
+--host http://localhost:8086
+
+
+curl -i http://localhost:8086/health
 
 
 Open your browser and go to:
@@ -50,49 +55,69 @@ Password: admin
 
 
 2. Add InfluxDB as a Data Source in Grafana
-   Login to Grafana UI.
 
-On the left sidebar, click Gear Icon → Data Sources → Add data source.
+✅ Step 1: Ensure InfluxDB is a Data Source
+Login to Grafana (usually at http://localhost:3000)
 
-Select InfluxDB from the list.
+Go to ⚙️ Settings → Data Sources
 
-Configure the data source fields:
+Click “Add data source”
 
-URL:
-http://influxdb:8086 (or your InfluxDB host URL)
+Select InfluxDB
 
-Query Language:
-Choose Flux
+Configure:
 
-Organization:
-Your InfluxDB org name (e.g., "org")
+Query Language: Flux
 
-Token:
-Your InfluxDB token (the one you use in your code)
+URL: http://influxdb:8086
 
-Default Bucket:
-Choose your bucket (e.g., voice_bucket or text_bucket)
+Organization: org
+username: admin
+password: admin123
 
-Click Save & Test — you should see a success message.
+Token: Paste your InfluxDB token
 
+Default Bucket: voice_bucket
 
-curl -i http://localhost:8086/health
+Click “Save & Test”
 
 
-3. Create a Dashboard & Panels
-   Click the + icon on the left → Dashboard → Add new panel.
+✅ Step 2: Create the Dashboard
+Go to + Create → Dashboard
 
-In the Query section, enter your Flux query. For example:
+Click “Add new panel”
+
+✅ Step 3: Add Panel Query
+Choose your InfluxDB data source
+
+Use this Flux query to plot the compound score over time:
+
+
 
 from(bucket: "voice_bucket")
-|> range(start: -1h)
-|> filter(fn: (r) => r._measurement == "voice_complaints")
-|> filter(fn: (r) => r._field == "compound")
-|> aggregateWindow(every: 1m, fn: mean, createEmpty: false)
+|> range(start: -3h)
+|> filter(fn: (r) => r._measurement == "voice_complaints" and r._field == "compound")
+|> aggregateWindow(every: 1m, fn: mean)
 |> yield(name: "mean")
 
-This query will show average compound sentiment scores over time.
+🔍 You can adjust range(start: -1h) to -24h, -7d, etc., and aggregateWindow interval as needed.
 
-Choose Visualization type, e.g., Time series or Bar gauge.
+✅ Step 4: Customize the Panel
+Panel title: "Voice Sentiment (Compound Score)"
 
-Adjust the panel settings as you like, then Save the dashboard.
+Visualization type: Time series, Gauge, or Bar chart
+
+Add thresholds (e.g., red < -0.5, green > 0.5)
+
+✅ Step 5: Save the Dashboard
+Click “Apply” to save the panel
+
+Click the disk icon 💾 at the top to save the dashboard
+
+🧠 Bonus Tips
+Add multiple panels: one for compound, another for neg/pos/neu
+
+Add filters for message_id, time ranges, etc.
+
+Set alerts if compound sentiment is too negative over time.
+
