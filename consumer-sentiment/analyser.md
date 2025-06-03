@@ -34,12 +34,12 @@ from(bucket: "text_bucket")
 
 
 influx query '
-from(bucket: "voice_bucket")
+from(bucket: "text_bucket")
 |> range(start: -1h)
-|> filter(fn: (r) => r._measurement == "voice_complaints" and r._field == "compound")
-|> limit(n: 10)
+|> filter(fn: (r) => r._measurement == "text_complaints" and r._field == "compound")
+|> limit(n: 20)
 ' --org "org" \
---token "iQR2Im5uSfaAYysoyyk8qfSV2N473QPh5231vEigm6dsg7CG2SOURDMv2BWBrZhjc0oGNswwANqG-glEz_UnXA==" \
+--token "43yGjpGckeqEHxBh4GRbjGVYpgS8bdCEDUSz0sJ934V9wFu6BxXMmje8k_RlPn4GOrMfp2OcA-0h2Sf4vuGdEA==" \
 --host http://localhost:8086
 
 

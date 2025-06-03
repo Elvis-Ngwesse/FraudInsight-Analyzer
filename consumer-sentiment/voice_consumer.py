@@ -10,7 +10,9 @@ from minio import Minio
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 import whisper
 from influxdb_client import InfluxDBClient, Point, WritePrecision
+
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
+
 
 def get_env_var(name):
     value = os.getenv(name)
@@ -18,8 +20,8 @@ def get_env_var(name):
         raise EnvironmentError(f"Missing required environment variable: {name}")
     return value
 
+
 # --- Environment variables ---
-# Config from env, no defaults allowed:
 RABBITMQ_HOST_LOCAL = get_env_var("RABBITMQ_HOST")
 RABBITMQ_PORT = int(get_env_var("RABBITMQ_PORT"))
 RABBITMQ_USER = get_env_var("RABBITMQ_USER")
@@ -94,7 +96,8 @@ def callback(ch, method, properties, body):
         message = json.loads(body)
         logging.info(f"Message JSON parsed: {message}")
 
-        message_id = message.get("message_id", "unknown")
+        # Use 'id' field primarily for message id, fallback to message_id or unknown
+        message_id = message.get("id") or message.get("message_id") or "unknown"
         object_name = message.get("object_name")
 
         if not object_name:
@@ -147,7 +150,7 @@ def callback(ch, method, properties, body):
 def connect_to_rabbitmq():
     delay = RETRY_DELAY
     parameters = pika.ConnectionParameters(
-        host=RABBITMQ_HOST,
+        host=RABBITMQ_HOST_LOCAL,
         port=RABBITMQ_PORT,
         virtual_host=RABBITMQ_VHOST,
         credentials=pika.PlainCredentials(RABBITMQ_USER, RABBITMQ_PASS),

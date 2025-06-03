@@ -5,6 +5,7 @@ import time
 import logging
 import pika
 import boto3
+import redis
 import tempfile
 from datetime import datetime
 from TTS.api import TTS
@@ -13,20 +14,26 @@ from utils import generate_dialogue  # your own module
 # Setup logging
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s"
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    force=True
 )
 
-# RabbitMQ config
-RABBITMQ_HOST = os.getenv("RABBITMQ_HOST", "rabbitmq")
-VOICE_QUEUE = os.getenv("VOICE_QUEUE", "voice_complaints")
+# Environment Variables
+RABBITMQ_HOST = os.getenv("RABBITMQ_HOST")
+VOICE_QUEUE = "voice_complaints"
 
-# MinIO config
-MINIO_ENDPOINT = os.getenv("MINIO_ENDPOINT", "minio:9000")
-MINIO_ACCESS_KEY = os.getenv("MINIO_ACCESS_KEY", "minioadmin")
-MINIO_SECRET_KEY = os.getenv("MINIO_SECRET_KEY", "minioadmin")
-MINIO_BUCKET = os.getenv("MINIO_BUCKET", "audio")
+MINIO_ENDPOINT = os.getenv("MINIO_ENDPOINT")
+MINIO_ACCESS_KEY = os.getenv("MINIO_ACCESS_KEY")
+MINIO_SECRET_KEY = os.getenv("MINIO_SECRET_KEY")
+MINIO_BUCKET = os.getenv("MINIO_BUCKET")
 
-# Initialize S3 client
+REDIS_HOST_LOCAL = os.getenv("REDIS_HOST")
+REDIS_PORT = os.getenv("REDIS_PORT")
+
+MAX_RETRIES = 10
+RETRY_DELAY = 2
+MESSAGE_LENGHT=40
+# MinIO (S3-compatible) client setup
 s3 = boto3.client(
     "s3",
     endpoint_url=f"http://{MINIO_ENDPOINT}",
@@ -89,6 +96,20 @@ def connect_to_rabbitmq():
     raise RuntimeError("[RabbitMQ] Failed to connect after 10 attempts")
 
 
+def connect_to_redis():
+    for attempt in range(MAX_RETRIES):
+        try:
+            logging.info(f"[Redis] Connecting to {REDIS_HOST_LOCAL}:{REDIS_PORT} (attempt {attempt + 1})")
+            redis_client = redis.Redis(host=REDIS_HOST_LOCAL, port=REDIS_PORT, db=0)
+            redis_client.ping()
+            logging.info("[Redis] Connection established")
+            return redis_client
+        except redis.exceptions.ConnectionError as e:
+            logging.warning(f"[Redis] Connection failed: {e}")
+            time.sleep(RETRY_DELAY)
+    raise Exception("[Redis] Failed to connect after retries")
+
+
 def generate_and_upload_audio(dialogue_lines, audio_id):
     logging.info(f"[Audio] Generating TTS chunks for audio_id: {audio_id}")
     chunks = list(split_into_chunks(dialogue_lines))
@@ -119,6 +140,8 @@ def main():
     channel = connect_to_rabbitmq()
     channel.queue_declare(queue=VOICE_QUEUE, durable=True)
 
+    redis_client = connect_to_redis()
+
     scenario_names = ["fraud", "card_issue", "login_problem"]
 
     for i in range(2000):
@@ -126,18 +149,23 @@ def main():
         audio_id = f"voice-{uuid.uuid4()}-{int(time.time())}"
         logging.info(f"[{i + 1}/2000] Creating voice complaint for scenario: '{scenario}', ID: {audio_id}")
 
-        dialogue_text = generate_dialogue(100)
-        logging.info(f"[Dialogue] Generated 100-line dialogue for scenario: {scenario}")
+        dialogue_text = generate_dialogue(MESSAGE_LENGHT)
+        logging.info(f"[Dialogue] Generated 20-line dialogue for scenario: {scenario}")
 
         audio_url = generate_and_upload_audio(dialogue_text.splitlines(), audio_id)
+
+        # Add object_name field here
+        object_name = f"{audio_id}.wav"
 
         payload = {
             "id": audio_id,
             "timestamp": datetime.utcnow().isoformat(),
             "audio_url": audio_url,
+            "object_name": object_name,
             "scenario": scenario,
         }
 
+        # Send to RabbitMQ
         channel.basic_publish(
             exchange="",
             routing_key=VOICE_QUEUE,
@@ -145,6 +173,12 @@ def main():
             properties=pika.BasicProperties(delivery_mode=2),
         )
         logging.info(f"[RabbitMQ] ✅ Pushed complaint to queue '{VOICE_QUEUE}' with ID: {audio_id}")
+
+        # Save to Redis
+        redis_key = f"voice:{audio_id}"
+        redis_client.set(redis_key, json.dumps(payload))
+        logging.info(f"[Redis] 📝 Stored metadata with key: {redis_key}")
+
         time.sleep(0.5)
 
     logging.info("🎉 All complaints sent successfully.")

@@ -14,12 +14,12 @@ services:
       retries: 5
       start_period: 40s
     environment:
-      - DOCKER_INFLUXDB_INIT_MODE=setup
-      - DOCKER_INFLUXDB_INIT_USERNAME=${INFLUXDB_INIT_USERNAME}
-      - DOCKER_INFLUXDB_INIT_PASSWORD=${INFLUXDB_INIT_PASSWORD}
-      - DOCKER_INFLUXDB_INIT_ORG=${INFLUXDB_INIT_ORG}
-      - DOCKER_INFLUXDB_INIT_BUCKET=${INFLUXDB_INIT_BUCKET}
-      - DOCKER_INFLUXDB_INIT_ADMIN_TOKEN=${INFLUXDB_INIT_ADMIN_TOKEN}
+      - INFLUXDB_INIT_MODE=${INFLUXDB_INIT_MODE}
+      - INFLUXDB_USERNAME=${INFLUXDB_USERNAME}
+      - INFLUXDB_PASSWORD=${INFLUXDB_PASSWORD}
+      - INFLUXDB_ORG=${INFLUXDB_ORG}
+      - INFLUXDB_BUCKET=${INFLUXDB_BUCKET}
+      - INFLUXDB_TOKEN=${INFLUXDB_TOKEN}
     networks:
       - producer_app-network
     restart: unless-stopped
@@ -60,6 +60,7 @@ services:
       - RABBITMQ_VHOST=${RABBITMQ_VHOST}
       - INFLUXDB_URL=${INFLUXDB_URL}
       - INFLUXDB_ORG=${INFLUXDB_ORG}
+      - INFLUXDB_TOKEN=${INFLUXDB_TOKEN}
       - INFLUXDB_BUCKET=${INFLUXDB_BUCKET_TEXT}
     volumes:
       - ./text_consumer.py:/app/text_consumer.py:ro
@@ -88,6 +89,7 @@ services:
       - MINIO_ACCESS_KEY=${MINIO_ACCESS_KEY}
       - MINIO_SECRET_KEY=${MINIO_SECRET_KEY}
       - MINIO_BUCKET=${MINIO_BUCKET}
+      - INFLUXDB_TOKEN=${INFLUXDB_TOKEN}
     volumes:
       - ./voice_consumer.py:/app/voice_consumer.py:ro
       - ./requirements.txt:/app/requirements.txt:ro
