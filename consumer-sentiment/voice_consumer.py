@@ -91,30 +91,19 @@ def download_audio(object_name):
 
 def callback(ch, method, properties, body):
     audio_path = None
+    message_id = "unknown"
     try:
         logging.info(f"Received message from queue '{QUEUE_NAME}': {body}")
         message = json.loads(body)
-        logging.info(f"Message JSON parsed: {message}")
-
         message_id = message.get("id") or message.get("message_id") or "unknown"
         object_name = message.get("object_name")
-
         if not object_name:
             raise ValueError(f"Message {message_id} missing 'object_name' field")
 
         audio_path = download_audio(object_name)
-
         result = whisper_model.transcribe(audio_path)
-        logging.info(f"Whisper transcription result: {result}")
-
         transcript = result.get("text", "").strip()
-        logging.info(f"Transcript for {message_id}: '{transcript}'")
-
-        if not transcript:
-            logging.warning(f"Empty transcript for message {message_id}")
-
         sentiment = analyzer.polarity_scores(transcript)
-        logging.info(f"Sentiment for {message_id}: {sentiment}")
 
         point = (
             Point("voice_complaints")
@@ -125,15 +114,29 @@ def callback(ch, method, properties, body):
             .field("pos", sentiment["pos"])
             .field("compound", sentiment["compound"])
         )
-
         write_api.write(bucket=INFLUXDB_BUCKET_VOICE, record=point)
-        logging.info(f"Written point to InfluxDB: {point}")
+        logging.info(f"Written point to InfluxDB for {message_id}")
 
-        ch.basic_ack(delivery_tag=method.delivery_tag)
+        try:
+            if ch.is_open:
+                ch.basic_ack(delivery_tag=method.delivery_tag)
+                logging.info(f"Acknowledged message {message_id}")
+            else:
+                logging.warning(f"Channel already closed, could not ack message {message_id}")
+        except Exception as ack_err:
+            logging.warning(f"Error during ack for {message_id}: {ack_err}")
 
     except Exception:
-        logging.error(f"Failed to process message:\n{traceback.format_exc()}")
-        ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)
+        logging.error(f"Failed to process message {message_id}:\n{traceback.format_exc()}")
+        try:
+            if ch.is_open:
+                ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)
+                logging.info(f"Rejected message {message_id} with requeue=False")
+            else:
+                logging.warning(f"Channel closed, could not nack message {message_id}")
+        except Exception as nack_err:
+            logging.warning(f"Error during nack for {message_id}: {nack_err}")
+
     finally:
         if audio_path and os.path.exists(audio_path):
             try:
@@ -178,19 +181,27 @@ def main():
             channel = connection.channel()
             channel.queue_declare(queue=QUEUE_NAME, durable=True)
             channel.basic_qos(prefetch_count=1)
-            channel.basic_consume(queue=QUEUE_NAME, on_message_callback=callback)
+            channel.basic_consume(queue=QUEUE_NAME, on_message_callback=callback, auto_ack=False)
 
             logging.info("Waiting for voice complaints...")
             channel.start_consuming()
-        except pika.exceptions.AMQPConnectionError as e:
-            logging.error(f"Lost RabbitMQ connection: {e}, reconnecting in {RETRY_DELAY} seconds...")
+
+        except pika.exceptions.StreamLostError as sle:
+            logging.warning(f"Stream lost error: {sle}, reconnecting in {RETRY_DELAY} seconds...")
             time.sleep(RETRY_DELAY)
+
+        except pika.exceptions.AMQPConnectionError as ce:
+            logging.error(f"Connection error: {ce}, reconnecting in {RETRY_DELAY} seconds...")
+            time.sleep(RETRY_DELAY)
+
         except KeyboardInterrupt:
             logging.info("Interrupted by user, shutting down...")
             break
+
         except Exception:
             logging.error(f"Unexpected error:\n{traceback.format_exc()}")
             time.sleep(RETRY_DELAY)
+
         finally:
             if connection and not connection.is_closed:
                 try:
