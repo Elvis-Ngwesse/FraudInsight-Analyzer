@@ -793,4 +793,4 @@ def generate_dialogue(total_lines=50):
 if __name__ == "__main__":
     customer = generate_customer()
     print(f"Customer Info: {customer}\n")
-    print(generate_dialogue(300))
+    generate_dialogue(300)

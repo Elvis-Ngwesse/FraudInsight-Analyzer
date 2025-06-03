@@ -6,7 +6,10 @@ import logging
 import os
 from utils import generate_customer, generate_dialogue
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s"
+)
 
 
 def get_env_var(name):
@@ -39,28 +42,28 @@ def connect_to_rabbitmq():
     )
     for attempt in range(MAX_RETRIES):
         try:
-            logging.info(f"Connecting to RabbitMQ at {RABBITMQ_HOST_LOCAL} (attempt {attempt + 1})")
+            logging.info(f"[RabbitMQ] Connecting to {RABBITMQ_HOST_LOCAL} (attempt {attempt + 1})")
             connection = pika.BlockingConnection(parameters)
-            logging.info("Connected to RabbitMQ.")
+            logging.info("[RabbitMQ] Connection established")
             return connection
         except pika.exceptions.AMQPConnectionError as e:
-            logging.warning(f"RabbitMQ not ready: {e}")
+            logging.warning(f"[RabbitMQ] Connection failed: {e}")
             time.sleep(RETRY_DELAY)
-    raise Exception("Failed to connect to RabbitMQ after retries.")
+    raise Exception("[RabbitMQ] Failed to connect after retries")
 
 
 def connect_to_redis():
     for attempt in range(MAX_RETRIES):
         try:
-            logging.info(f"Connecting to Redis at {REDIS_HOST_LOCAL}:{REDIS_PORT} (attempt {attempt + 1})")
+            logging.info(f"[Redis] Connecting to {REDIS_HOST_LOCAL}:{REDIS_PORT} (attempt {attempt + 1})")
             redis_client = redis.Redis(host=REDIS_HOST_LOCAL, port=REDIS_PORT, db=0)
             redis_client.ping()
-            logging.info("Connected to Redis.")
+            logging.info("[Redis] Connection established")
             return redis_client
         except redis.exceptions.ConnectionError as e:
-            logging.warning(f"Redis not ready: {e}")
+            logging.warning(f"[Redis] Connection failed: {e}")
             time.sleep(RETRY_DELAY)
-    raise Exception("Failed to connect to Redis after retries.")
+    raise Exception("[Redis] Failed to connect after retries")
 
 
 def main():
@@ -71,20 +74,19 @@ def main():
 
     for i in range(TOTAL_MESSAGES):
         customer = generate_customer()
+        logging.info(f"[{i + 1}/{TOTAL_MESSAGES}] Generating complaint for customer: {customer['name']} (ID: {customer['id']})")
 
-        # Accumulate complaint lines until min lines met
         complaint_lines = []
         while len(complaint_lines) < MIN_LINES_PER_COMPLAINT:
             dialogue = generate_dialogue()
-            # Split dialogue by lines (assuming '\n' or can split by '. ' if needed)
             lines = [line.strip() for line in dialogue.split('\n') if line.strip()]
             complaint_lines.extend(lines)
 
-        # Join the lines into one complaint text
         complaint_text = "\n".join(complaint_lines[:MIN_LINES_PER_COMPLAINT])
-
         timestamp = time.time()
         message_id = f"text-{customer['id']}-{int(timestamp)}"
+
+        logging.info(f"[{i + 1}/{TOTAL_MESSAGES}] Complaint ready (Lines: {len(complaint_lines)}). Preparing to publish message_id: {message_id}")
 
         message = {
             "message_id": message_id,
@@ -101,8 +103,7 @@ def main():
                 properties=pika.BasicProperties(delivery_mode=2)
             )
         except (pika.exceptions.AMQPConnectionError, pika.exceptions.ChannelWrongStateError) as e:
-            logging.error(f"Failed to publish message: {e}. Reconnecting and retrying.")
-            # Reconnect and retry once
+            logging.error(f"[RabbitMQ] Publish failed: {e}. Attempting reconnect.")
             try:
                 rabbit_conn.close()
             except Exception:
@@ -125,12 +126,12 @@ def main():
             "timestamp": timestamp
         })
 
-        logging.info(f"[{i + 1}/{TOTAL_MESSAGES}] Sent text complaint: {message_id}")
+        logging.info(f"[{i + 1}/{TOTAL_MESSAGES}] ✅ Message published and stored in Redis: {message_id}")
 
         time.sleep(DELAY_BETWEEN_MESSAGES)
 
     rabbit_conn.close()
-    logging.info("Finished sending all complaints.")
+    logging.info("🚀 Finished sending all text complaints.")
 
 
 if __name__ == "__main__":

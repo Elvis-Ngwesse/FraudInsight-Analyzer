@@ -1,6 +1,8 @@
 pika
 redis
-pyttsx3
+TTS==0.15.2
+torchaudio
 minio
 faker
 pydub
+boto3
