@@ -10,21 +10,25 @@ import pyttsx3
 from minio import Minio
 from minio.error import S3Error
 from pydub import AudioSegment
-from utils import generate_customer, generate_dialogue
 import wave
+from utils import generate_customer, generate_dialogue
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
+def get_env(key, default=None, required=False):
+    value = os.getenv(key, default)
+    if required and value is None:
+        raise EnvironmentError(f"Missing required environment variable: {key}")
+    return value
 
-# --- Environment variables ---
-RABBITMQ_HOST = os.getenv("RABBITMQ_HOST", "rabbitmq")
+RABBITMQ_HOST = get_env("RABBITMQ_HOST", required=True)
+REDIS_HOST = get_env("REDIS_HOST", required=True)
+REDIS_PORT = int(get_env("REDIS_PORT", required=True))
+MINIO_ENDPOINT = get_env("MINIO_ENDPOINT", required=True)
+MINIO_ACCESS_KEY = get_env("MINIO_ACCESS_KEY", required=True)
+MINIO_SECRET_KEY = get_env("MINIO_SECRET_KEY", required=True)
+MINIO_BUCKET = get_env("MINIO_BUCKET", required=True)
 QUEUE_NAME = 'voice_complaints'
-REDIS_HOST = os.getenv("REDIS_HOST", "redis")
-REDIS_PORT = int(os.getenv("REDIS_PORT", 6379))
-MINIO_ENDPOINT = os.getenv("MINIO_ENDPOINT", "minio:9000")
-MINIO_ACCESS_KEY = os.getenv("MINIO_ACCESS_KEY", "minioadmin")
-MINIO_SECRET_KEY = os.getenv("MINIO_SECRET_KEY", "minioadmin")
-MINIO_BUCKET = os.getenv("MINIO_BUCKET", "audiofiles")
 MAX_RETRIES = 5         # max retries for TTS or connections
 RETRY_DELAY = 5         # initial retry delay in seconds
 HEARTBEAT_INTERVAL = 120
@@ -152,11 +156,27 @@ def main():
     for i in range(2000):
         try:
             customer = generate_customer()
-            complaint_text = generate_dialogue()
 
-            # Check for empty or very short complaint text to avoid TTS empty audio
-            if not complaint_text or len(complaint_text.strip()) < 10:
-                logging.warning(f"Skipping iteration {i+1} due to empty or too short complaint text.")
+            # Keep generating dialogue until we get at least 20 lines
+            dialogue_lines = []
+            while len(dialogue_lines) < 20:
+                dialogue = generate_dialogue()
+                # If generate_dialogue returns list of lines, use directly
+                # If returns multiline string, split by newlines
+                if isinstance(dialogue, list):
+                    dialogue_lines = dialogue
+                else:
+                    dialogue_lines = dialogue.strip().split('\n')
+
+            # Use exactly first 20 lines
+            selected_lines = dialogue_lines[:20]
+
+            # Join lines with natural pauses
+            complaint_text = ". ".join(line.strip() for line in selected_lines if line.strip()) + "."
+
+            # Safety check for minimum length (~50 words)
+            if not complaint_text or len(complaint_text.strip().split()) < 50:
+                logging.warning(f"Skipping iteration {i+1} due to too short complaint text.")
                 continue
 
             timestamp = time.time()
@@ -166,6 +186,7 @@ def main():
             logging.info(f"[{i + 1}/2000] Generating TTS for: {message_id}")
 
             temp_audio_path = None
+            upload_success = False
             try:
                 temp_audio_path = text_to_speech_file_to_temp(complaint_text)
                 if not temp_audio_path:
@@ -221,7 +242,7 @@ def main():
             logging.error(f"Unexpected error at iteration {i + 1}: {e}")
             logging.error(traceback.format_exc())
 
-        # Sleep 1 minute between each complaint (offline TTS - no API rate limit)
+        # Sleep between each complaint
         time.sleep(DELAY_BETWEEN_MESSAGES)
 
     try:

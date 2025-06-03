@@ -10,26 +10,32 @@ from minio import Minio
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 import whisper
 from influxdb_client import InfluxDBClient, Point, WritePrecision
-
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
 
-# Config from env
-RABBITMQ_HOST = os.getenv("RABBITMQ_HOST", "localhost")
-RABBITMQ_PORT = int(os.getenv("RABBITMQ_PORT", 5672))
-RABBITMQ_USER = os.getenv("RABBITMQ_USER", "guest")
-RABBITMQ_PASS = os.getenv("RABBITMQ_PASS", "guest")
-RABBITMQ_VHOST = os.getenv("RABBITMQ_VHOST", "/")
+def get_env_var(name):
+    value = os.getenv(name)
+    if value is None:
+        raise EnvironmentError(f"Missing required environment variable: {name}")
+    return value
+
+# --- Environment variables ---
+# Config from env, no defaults allowed:
+RABBITMQ_HOST_LOCAL = get_env_var("RABBITMQ_HOST")
+RABBITMQ_PORT = int(get_env_var("RABBITMQ_PORT"))
+RABBITMQ_USER = get_env_var("RABBITMQ_USER")
+RABBITMQ_PASS = get_env_var("RABBITMQ_PASS")
+RABBITMQ_VHOST = get_env_var("RABBITMQ_VHOST")
 QUEUE_NAME = "voice_complaints"
 
-MINIO_ENDPOINT = os.getenv("MINIO_ENDPOINT", "minio:9000")
-MINIO_ACCESS_KEY = os.getenv("MINIO_ACCESS_KEY", "minioadmin")
-MINIO_SECRET_KEY = os.getenv("MINIO_SECRET_KEY", "minioadmin")
-MINIO_BUCKET = os.getenv("MINIO_BUCKET", "audiofiles")
+MINIO_ENDPOINT = get_env_var("MINIO_ENDPOINT")
+MINIO_ACCESS_KEY = get_env_var("MINIO_ACCESS_KEY")
+MINIO_SECRET_KEY = get_env_var("MINIO_SECRET_KEY")
+MINIO_BUCKET = get_env_var("MINIO_BUCKET")
 
-INFLUXDB_URL = os.getenv("INFLUXDB_URL", "http://localhost:8086")
-INFLUXDB_ORG = os.getenv("INFLUXDB_ORG", "org")
-INFLUXDB_BUCKET = os.getenv("INFLUXDB_BUCKET", "voice_bucket")
-INFLUXDB_TOKEN = os.getenv("INFLUXDB_TOKEN", "iQR2Im5uSfaAYysoyyk8qfSV2N473QPh5231vEigm6dsg7CG2SOURDMv2BWBrZhjc0oGNswwANqG-glEz_UnXA==")
+INFLUXDB_URL_LOCAL = get_env_var("INFLUXDB_URL")
+INFLUXDB_ORG = get_env_var("INFLUXDB_ORG")
+INFLUXDB_BUCKET_VOICE = get_env_var("INFLUXDB_BUCKET")
+INFLUXDB_TOKEN = get_env_var("INFLUXDB_TOKEN")
 
 MAX_RETRIES = 5
 RETRY_DELAY = 5  # seconds
@@ -45,7 +51,7 @@ minio_client = Minio(
 analyzer = SentimentIntensityAnalyzer()
 whisper_model = whisper.load_model("base")
 
-influx_client = InfluxDBClient(url=INFLUXDB_URL, token=INFLUXDB_TOKEN, org=INFLUXDB_ORG)
+influx_client = InfluxDBClient(url=INFLUXDB_URL_LOCAL, token=INFLUXDB_TOKEN, org=INFLUXDB_ORG)
 write_api = influx_client.write_api(write_precision=WritePrecision.NS)
 
 
@@ -119,7 +125,7 @@ def callback(ch, method, properties, body):
         )
 
         try:
-            write_api.write(bucket=INFLUXDB_BUCKET, record=point)
+            write_api.write(bucket=INFLUXDB_BUCKET_VOICE, record=point)
             logging.info(f"Written point to InfluxDB: {point}")
         except Exception as e:
             logging.error(f"InfluxDB write failed: {e}")
@@ -152,7 +158,7 @@ def connect_to_rabbitmq():
     )
     for attempt in range(1, MAX_RETRIES + 1):
         try:
-            logging.info(f"Connecting to RabbitMQ at {RABBITMQ_HOST}:{RABBITMQ_PORT} (attempt {attempt})")
+            logging.info(f"Connecting to RabbitMQ at {RABBITMQ_HOST_LOCAL}:{RABBITMQ_PORT} (attempt {attempt})")
             connection = pika.BlockingConnection(parameters)
             logging.info("Connected to RabbitMQ.")
             return connection
@@ -160,11 +166,11 @@ def connect_to_rabbitmq():
             logging.warning(f"RabbitMQ not ready: {e}. Retrying in {delay}s...")
             time.sleep(delay)
             delay = min(delay * 2, 60)
-    raise ConnectionError(f"Could not connect to RabbitMQ at {RABBITMQ_HOST} after {MAX_RETRIES} attempts")
+    raise ConnectionError(f"Could not connect to RabbitMQ at {RABBITMQ_HOST_LOCAL} after {MAX_RETRIES} attempts")
 
 
 def main():
-    ensure_bucket_exists(influx_client, INFLUXDB_BUCKET, INFLUXDB_ORG)
+    ensure_bucket_exists(influx_client, INFLUXDB_BUCKET_VOICE, INFLUXDB_ORG)
 
     connection = connect_to_rabbitmq()
     channel = connection.channel()

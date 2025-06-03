@@ -8,21 +8,30 @@ from utils import generate_customer, generate_dialogue
 
 logging.basicConfig(level=logging.INFO)
 
-RABBITMQ_HOST = os.getenv("RABBITMQ_HOST", "localhost")
-REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
-REDIS_PORT = int(os.getenv("REDIS_PORT", 6379))
+
+def get_env_var(name):
+    value = os.getenv(name)
+    if value is None:
+        raise EnvironmentError(f"Missing required environment variable: {name}")
+    return value
+
+
+RABBITMQ_HOST_LOCAL = get_env_var("RABBITMQ_HOST")
+REDIS_HOST_LOCAL = get_env_var("REDIS_HOST")
+REDIS_PORT = int(get_env_var("REDIS_PORT"))
+
 QUEUE_NAME = 'text_complaints'
 TOTAL_MESSAGES = 2000
 DELAY_BETWEEN_MESSAGES = 60  # seconds
-
 MAX_RETRIES = 10
 RETRY_DELAY = 5  # seconds
 HEARTBEAT_INTERVAL = 120  # seconds
+MIN_LINES_PER_COMPLAINT = 20  # Minimum lines in each complaint text
 
 
 def connect_to_rabbitmq():
     parameters = pika.ConnectionParameters(
-        host=RABBITMQ_HOST,
+        host=RABBITMQ_HOST_LOCAL,
         heartbeat=HEARTBEAT_INTERVAL,
         blocked_connection_timeout=300,
         connection_attempts=MAX_RETRIES,
@@ -30,7 +39,7 @@ def connect_to_rabbitmq():
     )
     for attempt in range(MAX_RETRIES):
         try:
-            logging.info(f"Connecting to RabbitMQ at {RABBITMQ_HOST} (attempt {attempt + 1})")
+            logging.info(f"Connecting to RabbitMQ at {RABBITMQ_HOST_LOCAL} (attempt {attempt + 1})")
             connection = pika.BlockingConnection(parameters)
             logging.info("Connected to RabbitMQ.")
             return connection
@@ -43,8 +52,8 @@ def connect_to_rabbitmq():
 def connect_to_redis():
     for attempt in range(MAX_RETRIES):
         try:
-            logging.info(f"Connecting to Redis at {REDIS_HOST}:{REDIS_PORT} (attempt {attempt + 1})")
-            redis_client = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, db=0)
+            logging.info(f"Connecting to Redis at {REDIS_HOST_LOCAL}:{REDIS_PORT} (attempt {attempt + 1})")
+            redis_client = redis.Redis(host=REDIS_HOST_LOCAL, port=REDIS_PORT, db=0)
             redis_client.ping()
             logging.info("Connected to Redis.")
             return redis_client
@@ -62,7 +71,18 @@ def main():
 
     for i in range(TOTAL_MESSAGES):
         customer = generate_customer()
-        complaint_text = generate_dialogue()
+
+        # Accumulate complaint lines until min lines met
+        complaint_lines = []
+        while len(complaint_lines) < MIN_LINES_PER_COMPLAINT:
+            dialogue = generate_dialogue()
+            # Split dialogue by lines (assuming '\n' or can split by '. ' if needed)
+            lines = [line.strip() for line in dialogue.split('\n') if line.strip()]
+            complaint_lines.extend(lines)
+
+        # Join the lines into one complaint text
+        complaint_text = "\n".join(complaint_lines[:MIN_LINES_PER_COMPLAINT])
+
         timestamp = time.time()
         message_id = f"text-{customer['id']}-{int(timestamp)}"
 
@@ -105,7 +125,7 @@ def main():
             "timestamp": timestamp
         })
 
-        logging.info(f"[{i+1}/{TOTAL_MESSAGES}] Sent text complaint: {message_id}")
+        logging.info(f"[{i + 1}/{TOTAL_MESSAGES}] Sent text complaint: {message_id}")
 
         time.sleep(DELAY_BETWEEN_MESSAGES)
 

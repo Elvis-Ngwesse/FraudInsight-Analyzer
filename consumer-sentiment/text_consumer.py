@@ -5,22 +5,26 @@ import logging
 import traceback
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 from influxdb_client import InfluxDBClient, Point, WritePrecision
-
 logging.basicConfig(level=logging.INFO)
 
-# Config from env vars
-RABBITMQ_HOST = os.getenv("RABBITMQ_HOST", "localhost")
-RABBITMQ_PORT = int(os.getenv("RABBITMQ_PORT", 5672))
-RABBITMQ_USER = os.getenv("RABBITMQ_USER", "guest")
-RABBITMQ_PASS = os.getenv("RABBITMQ_PASS", "guest")
-RABBITMQ_VHOST = os.getenv("RABBITMQ_VHOST", "/")
-QUEUE_NAME = "text_complaints"
 
-INFLUXDB_URL = os.getenv("INFLUXDB_URL", "http://localhost:8086")
-INFLUXDB_ORG = os.getenv("INFLUXDB_ORG", "org")
-INFLUXDB_BUCKET = os.getenv("INFLUXDB_BUCKET", "text_bucket")
-INFLUXDB_TOKEN = os.getenv("INFLUXDB_TOKEN", "iQR2Im5uSfaAYysoyyk8qfSV2N473QPh5231vEigm6dsg7CG2SOURDMv2BWBrZhjc0oGNswwANqG-glEz_UnXA==")
+def get_env_var(name):
+    value = os.getenv(name)
+    if value is None:
+        raise EnvironmentError(f"Missing required environment variable: {name}")
+    return value
 
+RABBITMQ_HOST_LOCAL = get_env_var("RABBITMQ_HOST")
+RABBITMQ_PORT = int(get_env_var("RABBITMQ_PORT"))
+RABBITMQ_USER = get_env_var("RABBITMQ_USER")
+RABBITMQ_PASS = get_env_var("RABBITMQ_PASS")
+RABBITMQ_VHOST = get_env_var("RABBITMQ_VHOST")
+QUEUE_NAME = "text_complaints"  # if you want this fixed, else env too
+
+INFLUXDB_URL_LOCAL = get_env_var("INFLUXDB_URL")
+INFLUXDB_ORG = get_env_var("INFLUXDB_ORG")
+INFLUXDB_BUCKET_TEXT = get_env_var("INFLUXDB_BUCKET")
+INFLUXDB_TOKEN = get_env_var("INFLUXDB_TOKEN")
 analyzer = SentimentIntensityAnalyzer()
 
 def ensure_bucket_exists(client, bucket_name, org):
@@ -36,7 +40,7 @@ def ensure_bucket_exists(client, bucket_name, org):
 def connect_to_rabbitmq():
     credentials = pika.PlainCredentials(RABBITMQ_USER, RABBITMQ_PASS)
     parameters = pika.ConnectionParameters(
-        host=RABBITMQ_HOST,
+        host=RABBITMQ_HOST_LOCAL,
         port=RABBITMQ_PORT,
         virtual_host=RABBITMQ_VHOST,
         credentials=credentials
@@ -65,7 +69,7 @@ def callback(ch, method, properties, body):
         else:
             logging.warning(f"Complaint text too long or invalid for message {message_id}, skipping 'text' field")
 
-        write_api.write(bucket=INFLUXDB_BUCKET, record=point)
+        write_api.write(bucket=INFLUXDB_BUCKET_TEXT, record=point)
 
         logging.info(f"Processed text complaint {message_id} | Compound: {sentiment['compound']}")
         ch.basic_ack(delivery_tag=method.delivery_tag)
@@ -77,8 +81,8 @@ def callback(ch, method, properties, body):
 def main():
     global write_api  # make available inside callback
 
-    influx_client = InfluxDBClient(url=INFLUXDB_URL, token=INFLUXDB_TOKEN, org=INFLUXDB_ORG)
-    ensure_bucket_exists(influx_client, INFLUXDB_BUCKET, INFLUXDB_ORG)
+    influx_client = InfluxDBClient(url=INFLUXDB_URL_LOCAL, token=INFLUXDB_TOKEN, org=INFLUXDB_ORG)
+    ensure_bucket_exists(influx_client, INFLUXDB_BUCKET_TEXT, INFLUXDB_ORG)
     write_api = influx_client.write_api(write_precision=WritePrecision.NS)
 
     conn = connect_to_rabbitmq()

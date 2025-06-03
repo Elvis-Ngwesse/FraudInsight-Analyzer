@@ -16,7 +16,7 @@ def generate_customer():
     }
 
 
-def generate_dialogue(total_lines=500):
+def generate_dialogue(total_lines=50):
     if total_lines % 2 != 0:
         total_lines += 1
 
