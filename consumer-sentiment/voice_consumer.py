@@ -83,69 +83,6 @@ def download_audio(object_name):
     except Exception as e:
         raise Exception(f"Download or validation failed: {e}")
 
-# --- RabbitMQ Message Callback ---
-def callback(ch, method, properties, body):
-    audio_path = None
-    message_id = "unknown"
-    try:
-        logging.info(f"Received message: {body}")
-        message = json.loads(body)
-        message_id = message.get("id") or message.get("message_id") or "unknown"
-        object_name = message.get("object_name")
-
-        if not object_name:
-            raise ValueError(f"Message {message_id} missing 'object_name'")
-
-        scenario = message.get("scenario", "unknown")
-        customer_id = message.get("customer_id", "unknown")
-        channel_source = message.get("channel", "unknown")
-
-        # Transcribe audio
-        audio_path = download_audio(object_name)
-        result = whisper_model.transcribe(audio_path)
-        transcript = result.get("text", "").strip()
-
-        if not transcript:
-            raise ValueError(f"Empty transcript for message {message_id}")
-
-        sentiment = analyzer.polarity_scores(transcript)
-
-        # InfluxDB point creation
-        point = (
-            Point("voice_complaints")
-            .tag("message_id", message_id)
-            .tag("scenario", scenario)
-            .tag("customer_id", customer_id)
-            .tag("channel", channel_source)
-            .field("transcript", transcript[:5000])
-            .field("neg", sentiment["neg"])
-            .field("neu", sentiment["neu"])
-            .field("pos", sentiment["pos"])
-            .field("compound", sentiment["compound"])
-            .time(datetime.utcnow(), WritePrecision.NS)
-        )
-
-        write_api.write(bucket=INFLUXDB_BUCKET_VOICE, record=point)
-        logging.info(f"Wrote point for message {message_id}")
-
-        if ch.is_open:
-            ch.basic_ack(delivery_tag=method.delivery_tag)
-            logging.info(f"Acknowledged message {message_id}")
-
-    except Exception:
-        logging.error(f"Error processing message {message_id}:\n{traceback.format_exc()}")
-        if ch.is_open:
-            ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)
-            logging.info(f"Rejected message {message_id}")
-
-    finally:
-        if audio_path and os.path.exists(audio_path):
-            try:
-                os.remove(audio_path)
-                logging.info(f"Deleted temp audio file: {audio_path}")
-            except Exception as e:
-                logging.warning(f"Could not delete temp file {audio_path}: {e}")
-
 # --- RabbitMQ Connection ---
 def connect_to_rabbitmq():
     parameters = pika.ConnectionParameters(
@@ -154,9 +91,10 @@ def connect_to_rabbitmq():
         virtual_host=RABBITMQ_VHOST,
         credentials=pika.PlainCredentials(RABBITMQ_USER, RABBITMQ_PASS),
         heartbeat=HEARTBEAT_INTERVAL,
-        blocked_connection_timeout=300,
+        blocked_connection_timeout=600,
         connection_attempts=MAX_RETRIES,
         retry_delay=RETRY_DELAY,
+        socket_timeout=600,
     )
     delay = RETRY_DELAY
     for attempt in range(1, MAX_RETRIES + 1):
@@ -177,36 +115,74 @@ def main():
 
     while True:
         connection = None
+        delivery_tag = None
         try:
+            # Step 1: Open connection and fetch message
             connection = connect_to_rabbitmq()
             channel = connection.channel()
             channel.queue_declare(queue=QUEUE_NAME, durable=True)
-            channel.basic_qos(prefetch_count=1)
-            channel.basic_consume(queue=QUEUE_NAME, on_message_callback=callback)
 
-            logging.info("Waiting for voice complaints...")
-            channel.start_consuming()
+            method_frame, properties, body = channel.basic_get(queue=QUEUE_NAME, auto_ack=False)
 
-        except (pika.exceptions.StreamLostError, pika.exceptions.AMQPConnectionError) as e:
-            logging.warning(f"Connection issue: {e}. Reconnecting in {RETRY_DELAY} seconds...")
-            time.sleep(RETRY_DELAY)
+            if not body:
+                connection.close()
+                time.sleep(1)
+                continue
 
-        except KeyboardInterrupt:
-            logging.info("Interrupted. Shutting down...")
-            break
+            delivery_tag = method_frame.delivery_tag
+            logging.info(f"Received message: {body}")
+            message = json.loads(body)
+            message_id = message.get("id") or message.get("message_id") or "unknown"
+            object_name = message.get("object_name")
+            scenario = message.get("scenario", "unknown")
+            customer_id = message.get("customer_id", "unknown")
+            channel_source = message.get("channel", "unknown")
 
-        except Exception:
-            logging.error(f"Unexpected error:\n{traceback.format_exc()}")
-            time.sleep(RETRY_DELAY)
+            if not object_name:
+                raise ValueError(f"Message {message_id} missing 'object_name'")
 
+            audio_path = download_audio(object_name)
+            result = whisper_model.transcribe(audio_path)
+            transcript = result.get("text", "").strip()
+
+            if not transcript:
+                raise ValueError(f"Empty transcript for message {message_id}")
+
+            sentiment = analyzer.polarity_scores(transcript)
+
+            point = (
+                Point("voice_complaints")
+                .tag("message_id", message_id)
+                .tag("scenario", scenario)
+                .tag("customer_id", customer_id)
+                .tag("channel", channel_source)
+                .field("transcript", transcript[:5000])
+                .field("neg", sentiment["neg"])
+                .field("neu", sentiment["neu"])
+                .field("pos", sentiment["pos"])
+                .field("compound", sentiment["compound"])
+                .time(datetime.utcnow(), WritePrecision.NS)
+            )
+            write_api.write(bucket=INFLUXDB_BUCKET_VOICE, record=point)
+            logging.info(f"Wrote point for message {message_id}")
+
+            channel.basic_ack(delivery_tag=delivery_tag)
+            logging.info(f"Acknowledged message {message_id}")
+
+        except Exception as e:
+            logging.error("Error processing message:\n%s", traceback.format_exc())
+            try:
+                if channel and channel.is_open and delivery_tag:
+                    channel.basic_nack(delivery_tag=delivery_tag, requeue=False)
+                    logging.info("Rejected message")
+            except Exception as nack_err:
+                logging.warning(f"Failed to nack message: {nack_err}")
         finally:
-            if connection and not connection.is_closed:
-                try:
+            try:
+                if connection and connection.is_open:
                     connection.close()
-                except Exception:
-                    pass
-
-    influx_client.close()
+            except Exception as e:
+                logging.warning(f"Failed to close connection cleanly: {e}")
 
 if __name__ == "__main__":
     main()
