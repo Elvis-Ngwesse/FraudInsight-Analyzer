@@ -27,11 +27,11 @@ macos
 windows
 - choco install influxdb
 influx query '
-from(bucket: "text_bucket")
+from(bucket: "voice_bucket")
 |> range(start: -1h)
-|> filter(fn: (r) => r._measurement == "text_complaints")
+|> filter(fn: (r) => r._measurement == "voice_complaints" and r._field == "compound")
 |> limit(n: 10)
-' --org "org" --token "3sZtR4jo135hOcs0i-kPakmTyGToy9LmfKk0JXtZZ7ghzcsIsIm-jGJvvFvmOXz3A0u7v6sVziTAHx36bvp2cg==" --host http://localhost:8086
+' --org "org" --token "opTyNmbY5UQssS4uqxXd3RRR3mZdM6R-EonzbROab1eyqRseVNOMGPewlBoIZBm4Xl7t4F2kumO273DBy1AgQQ==" --host http://localhost:8086
 
 
 influx query '
