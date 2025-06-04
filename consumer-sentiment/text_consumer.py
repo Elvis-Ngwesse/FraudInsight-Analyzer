@@ -5,15 +5,19 @@ import logging
 import traceback
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 from influxdb_client import InfluxDBClient, Point, WritePrecision
+from datetime import datetime
 
+# Setup logging
 logging.basicConfig(level=logging.INFO)
 
+# Utility to load env vars with error if missing
 def get_env_var(name):
     value = os.getenv(name)
     if value is None:
         raise EnvironmentError(f"Missing required environment variable: {name}")
     return value
 
+# Environment config
 RABBITMQ_HOST_LOCAL = get_env_var("RABBITMQ_HOST")
 RABBITMQ_PORT = int(get_env_var("RABBITMQ_PORT"))
 RABBITMQ_USER = get_env_var("RABBITMQ_USER")
@@ -28,6 +32,7 @@ INFLUXDB_TOKEN = get_env_var("INFLUXDB_TOKEN")
 
 analyzer = SentimentIntensityAnalyzer()
 
+# Ensure InfluxDB bucket exists
 def ensure_bucket_exists(client, bucket_name, org):
     buckets_api = client.buckets_api()
     existing_buckets = buckets_api.find_buckets().buckets
@@ -38,6 +43,7 @@ def ensure_bucket_exists(client, bucket_name, org):
         buckets_api.create_bucket(bucket_name=bucket_name, org=org)
         logging.info(f"Bucket '{bucket_name}' created.")
 
+# RabbitMQ connection setup
 def connect_to_rabbitmq():
     credentials = pika.PlainCredentials(RABBITMQ_USER, RABBITMQ_PASS)
     parameters = pika.ConnectionParameters(
@@ -48,22 +54,37 @@ def connect_to_rabbitmq():
     )
     return pika.BlockingConnection(parameters)
 
+# Main message processor
 def callback(ch, method, properties, body):
     try:
         message = json.loads(body)
+
         text = message.get("complaint_text", "")
         message_id = message.get("message_id", "unknown")
+        scenario = message.get("scenario", "unknown")
+        customer_id = message.get("customer_id", "unknown")
+        channel = message.get("channel", "unknown")
+
+        if not text.strip():
+            logging.warning(f"Empty complaint text for message {message_id}")
+            ch.basic_ack(delivery_tag=method.delivery_tag)
+            return
 
         sentiment = analyzer.polarity_scores(text)
 
         point = (
             Point("text_complaints")
             .tag("message_id", message_id)
+            .tag("scenario", scenario)
+            .tag("customer_id", customer_id)
+            .tag("channel", channel)
             .field("neg", sentiment["neg"])
             .field("neu", sentiment["neu"])
             .field("pos", sentiment["pos"])
             .field("compound", sentiment["compound"])
+            .time(datetime.utcnow(), WritePrecision.NS)
         )
+
         if isinstance(text, str) and len(text) < 5024:
             point = point.field("text", text)
         else:
@@ -78,6 +99,7 @@ def callback(ch, method, properties, body):
         logging.error("Failed to process message:\n" + traceback.format_exc())
         ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)
 
+# Entry point
 def main():
     global write_api
 
@@ -87,8 +109,6 @@ def main():
 
     conn = connect_to_rabbitmq()
     channel = conn.channel()
-
-    # Removed queue_declare to avoid argument conflicts
     channel.basic_qos(prefetch_count=1)
     channel.basic_consume(queue=QUEUE_NAME, on_message_callback=callback)
 

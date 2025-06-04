@@ -6,6 +6,8 @@ import tempfile
 import wave
 import time
 import traceback
+from datetime import datetime
+
 from minio import Minio
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 import whisper
@@ -13,15 +15,14 @@ from influxdb_client import InfluxDBClient, Point, WritePrecision
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
 
-
+# --- Utility ---
 def get_env_var(name):
     value = os.getenv(name)
     if value is None:
         raise EnvironmentError(f"Missing required environment variable: {name}")
     return value
 
-
-# --- Environment variables ---
+# --- Environment Variables ---
 RABBITMQ_HOST_LOCAL = get_env_var("RABBITMQ_HOST")
 RABBITMQ_PORT = int(get_env_var("RABBITMQ_PORT"))
 RABBITMQ_USER = get_env_var("RABBITMQ_USER")
@@ -43,20 +44,14 @@ MAX_RETRIES = 5
 RETRY_DELAY = 5  # seconds
 HEARTBEAT_INTERVAL = 60  # seconds
 
-minio_client = Minio(
-    MINIO_ENDPOINT,
-    access_key=MINIO_ACCESS_KEY,
-    secret_key=MINIO_SECRET_KEY,
-    secure=False,
-)
-
+# --- Clients ---
+minio_client = Minio(MINIO_ENDPOINT, access_key=MINIO_ACCESS_KEY, secret_key=MINIO_SECRET_KEY, secure=False)
 analyzer = SentimentIntensityAnalyzer()
 whisper_model = whisper.load_model("base")
-
 influx_client = InfluxDBClient(url=INFLUXDB_URL_LOCAL, token=INFLUXDB_TOKEN, org=INFLUXDB_ORG)
 write_api = influx_client.write_api(write_precision=WritePrecision.NS)
 
-
+# --- Ensure InfluxDB Bucket Exists ---
 def ensure_bucket_exists(client, bucket_name, org):
     buckets_api = client.buckets_api()
     existing_buckets = buckets_api.find_buckets().buckets
@@ -67,7 +62,7 @@ def ensure_bucket_exists(client, bucket_name, org):
         buckets_api.create_bucket(bucket_name=bucket_name, org=org)
         logging.info(f"Bucket '{bucket_name}' created.")
 
-
+# --- Download and Validate Audio ---
 def download_audio(object_name):
     try:
         stat = minio_client.stat_object(MINIO_BUCKET, object_name)
@@ -88,66 +83,71 @@ def download_audio(object_name):
     except Exception as e:
         raise Exception(f"Download or validation failed: {e}")
 
-
+# --- RabbitMQ Message Callback ---
 def callback(ch, method, properties, body):
     audio_path = None
     message_id = "unknown"
     try:
-        logging.info(f"Received message from queue '{QUEUE_NAME}': {body}")
+        logging.info(f"Received message: {body}")
         message = json.loads(body)
         message_id = message.get("id") or message.get("message_id") or "unknown"
         object_name = message.get("object_name")
-        if not object_name:
-            raise ValueError(f"Message {message_id} missing 'object_name' field")
 
+        if not object_name:
+            raise ValueError(f"Message {message_id} missing 'object_name'")
+
+        scenario = message.get("scenario", "unknown")
+        customer_id = message.get("customer_id", "unknown")
+        channel_source = message.get("channel", "unknown")
+
+        # Transcribe audio
         audio_path = download_audio(object_name)
         result = whisper_model.transcribe(audio_path)
         transcript = result.get("text", "").strip()
+
+        if not transcript:
+            raise ValueError(f"Empty transcript for message {message_id}")
+
         sentiment = analyzer.polarity_scores(transcript)
 
+        # InfluxDB point creation
         point = (
             Point("voice_complaints")
             .tag("message_id", message_id)
-            .field("transcript", transcript)
+            .tag("scenario", scenario)
+            .tag("customer_id", customer_id)
+            .tag("channel", channel_source)
+            .field("transcript", transcript[:5000])
             .field("neg", sentiment["neg"])
             .field("neu", sentiment["neu"])
             .field("pos", sentiment["pos"])
             .field("compound", sentiment["compound"])
+            .time(datetime.utcnow(), WritePrecision.NS)
         )
-        write_api.write(bucket=INFLUXDB_BUCKET_VOICE, record=point)
-        logging.info(f"Written point to InfluxDB for {message_id}")
 
-        try:
-            if ch.is_open:
-                ch.basic_ack(delivery_tag=method.delivery_tag)
-                logging.info(f"Acknowledged message {message_id}")
-            else:
-                logging.warning(f"Channel already closed, could not ack message {message_id}")
-        except Exception as ack_err:
-            logging.warning(f"Error during ack for {message_id}: {ack_err}")
+        write_api.write(bucket=INFLUXDB_BUCKET_VOICE, record=point)
+        logging.info(f"Wrote point for message {message_id}")
+
+        if ch.is_open:
+            ch.basic_ack(delivery_tag=method.delivery_tag)
+            logging.info(f"Acknowledged message {message_id}")
 
     except Exception:
-        logging.error(f"Failed to process message {message_id}:\n{traceback.format_exc()}")
-        try:
-            if ch.is_open:
-                ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)
-                logging.info(f"Rejected message {message_id} with requeue=False")
-            else:
-                logging.warning(f"Channel closed, could not nack message {message_id}")
-        except Exception as nack_err:
-            logging.warning(f"Error during nack for {message_id}: {nack_err}")
+        logging.error(f"Error processing message {message_id}:\n{traceback.format_exc()}")
+        if ch.is_open:
+            ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)
+            logging.info(f"Rejected message {message_id}")
 
     finally:
         if audio_path and os.path.exists(audio_path):
             try:
                 os.remove(audio_path)
-                logging.info(f"Deleted temporary audio file: {audio_path}")
+                logging.info(f"Deleted temp audio file: {audio_path}")
             except Exception as e:
-                logging.warning(f"Could not remove temp audio file {audio_path}: {e}")
+                logging.warning(f"Could not delete temp file {audio_path}: {e}")
 
-
+# --- RabbitMQ Connection ---
 def connect_to_rabbitmq():
-    delay = RETRY_DELAY
     parameters = pika.ConnectionParameters(
         host=RABBITMQ_HOST_LOCAL,
         port=RABBITMQ_PORT,
@@ -158,19 +158,20 @@ def connect_to_rabbitmq():
         connection_attempts=MAX_RETRIES,
         retry_delay=RETRY_DELAY,
     )
+    delay = RETRY_DELAY
     for attempt in range(1, MAX_RETRIES + 1):
         try:
-            logging.info(f"Connecting to RabbitMQ at {RABBITMQ_HOST_LOCAL}:{RABBITMQ_PORT} (attempt {attempt})")
-            connection = pika.BlockingConnection(parameters)
+            logging.info(f"Connecting to RabbitMQ (attempt {attempt})...")
+            conn = pika.BlockingConnection(parameters)
             logging.info("Connected to RabbitMQ.")
-            return connection
+            return conn
         except pika.exceptions.AMQPConnectionError as e:
             logging.warning(f"RabbitMQ not ready: {e}. Retrying in {delay}s...")
             time.sleep(delay)
             delay = min(delay * 2, 60)
-    raise ConnectionError(f"Could not connect to RabbitMQ at {RABBITMQ_HOST_LOCAL} after {MAX_RETRIES} attempts")
+    raise ConnectionError("Failed to connect to RabbitMQ after max retries")
 
-
+# --- Main Loop ---
 def main():
     ensure_bucket_exists(influx_client, INFLUXDB_BUCKET_VOICE, INFLUXDB_ORG)
 
@@ -181,21 +182,17 @@ def main():
             channel = connection.channel()
             channel.queue_declare(queue=QUEUE_NAME, durable=True)
             channel.basic_qos(prefetch_count=1)
-            channel.basic_consume(queue=QUEUE_NAME, on_message_callback=callback, auto_ack=False)
+            channel.basic_consume(queue=QUEUE_NAME, on_message_callback=callback)
 
             logging.info("Waiting for voice complaints...")
             channel.start_consuming()
 
-        except pika.exceptions.StreamLostError as sle:
-            logging.warning(f"Stream lost error: {sle}, reconnecting in {RETRY_DELAY} seconds...")
-            time.sleep(RETRY_DELAY)
-
-        except pika.exceptions.AMQPConnectionError as ce:
-            logging.error(f"Connection error: {ce}, reconnecting in {RETRY_DELAY} seconds...")
+        except (pika.exceptions.StreamLostError, pika.exceptions.AMQPConnectionError) as e:
+            logging.warning(f"Connection issue: {e}. Reconnecting in {RETRY_DELAY} seconds...")
             time.sleep(RETRY_DELAY)
 
         except KeyboardInterrupt:
-            logging.info("Interrupted by user, shutting down...")
+            logging.info("Interrupted. Shutting down...")
             break
 
         except Exception:
@@ -210,7 +207,6 @@ def main():
                     pass
 
     influx_client.close()
-
 
 if __name__ == "__main__":
     main()
