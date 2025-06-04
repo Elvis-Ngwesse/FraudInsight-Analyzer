@@ -6,6 +6,7 @@ import tempfile
 import wave
 import time
 import traceback
+import signal
 from datetime import datetime
 
 from minio import Minio
@@ -109,80 +110,99 @@ def connect_to_rabbitmq():
             delay = min(delay * 2, 60)
     raise ConnectionError("Failed to connect to RabbitMQ after max retries")
 
-# --- Main Loop ---
+# --- Graceful shutdown ---
+stop_consuming = False
+
+def signal_handler(sig, frame):
+    global stop_consuming
+    logging.info("Signal received, stopping consumer...")
+    stop_consuming = True
+
+def on_message(channel, method, properties, body):
+    global stop_consuming
+    delivery_tag = method.delivery_tag
+
+    try:
+        logging.info(f"Received message: {body}")
+        message = json.loads(body)
+        message_id = message.get("id") or message.get("message_id") or "unknown"
+        object_name = message.get("object_name")
+        scenario = message.get("scenario", "unknown")
+        customer_id = message.get("customer_id", "unknown")
+        channel_source = message.get("channel", "unknown")
+
+        if not object_name:
+            raise ValueError(f"Message {message_id} missing 'object_name'")
+
+        audio_path = download_audio(object_name)
+        result = whisper_model.transcribe(audio_path)
+        transcript = result.get("text", "").strip()
+
+        if not transcript:
+            raise ValueError(f"Empty transcript for message {message_id}")
+
+        sentiment = analyzer.polarity_scores(transcript)
+
+        point = (
+            Point("voice_complaints")
+            .tag("message_id", message_id)
+            .tag("scenario", scenario)
+            .tag("customer_id", customer_id)
+            .tag("channel", channel_source)
+            .field("transcript", transcript[:5000])
+            .field("neg", sentiment["neg"])
+            .field("neu", sentiment["neu"])
+            .field("pos", sentiment["pos"])
+            .field("compound", sentiment["compound"])
+            .time(datetime.utcnow(), WritePrecision.NS)
+        )
+        write_api.write(bucket=INFLUXDB_BUCKET_VOICE, record=point)
+        logging.info(f"Wrote point for message {message_id}")
+
+        # Acknowledge message after successful processing
+        channel.basic_ack(delivery_tag=delivery_tag)
+        logging.info(f"Acknowledged message {message_id}")
+
+    except Exception:
+        logging.error("Error processing message:\n%s", traceback.format_exc())
+        # Reject message without requeue on error
+        if channel.is_open:
+            try:
+                channel.basic_nack(delivery_tag=delivery_tag, requeue=False)
+                logging.info(f"Rejected message {delivery_tag}")
+            except Exception as nack_err:
+                logging.warning(f"Failed to nack message: {nack_err}")
+
+    if stop_consuming:
+        channel.stop_consuming()
+
 def main():
     ensure_bucket_exists(influx_client, INFLUXDB_BUCKET_VOICE, INFLUXDB_ORG)
 
-    while True:
-        connection = None
-        delivery_tag = None
-        try:
-            # Step 1: Open connection and fetch message
-            connection = connect_to_rabbitmq()
-            channel = connection.channel()
-            channel.queue_declare(queue=QUEUE_NAME, durable=True)
+    connection = connect_to_rabbitmq()
+    channel = connection.channel()
+    channel.queue_declare(queue=QUEUE_NAME, durable=True)
 
-            method_frame, properties, body = channel.basic_get(queue=QUEUE_NAME, auto_ack=False)
+    # Set prefetch count to 1 for fair dispatch
+    channel.basic_qos(prefetch_count=1)
 
-            if not body:
-                connection.close()
-                time.sleep(1)
-                continue
+    # Register signal handlers for graceful shutdown
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
 
-            delivery_tag = method_frame.delivery_tag
-            logging.info(f"Received message: {body}")
-            message = json.loads(body)
-            message_id = message.get("id") or message.get("message_id") or "unknown"
-            object_name = message.get("object_name")
-            scenario = message.get("scenario", "unknown")
-            customer_id = message.get("customer_id", "unknown")
-            channel_source = message.get("channel", "unknown")
+    channel.basic_consume(queue=QUEUE_NAME, on_message_callback=on_message, auto_ack=False)
 
-            if not object_name:
-                raise ValueError(f"Message {message_id} missing 'object_name'")
-
-            audio_path = download_audio(object_name)
-            result = whisper_model.transcribe(audio_path)
-            transcript = result.get("text", "").strip()
-
-            if not transcript:
-                raise ValueError(f"Empty transcript for message {message_id}")
-
-            sentiment = analyzer.polarity_scores(transcript)
-
-            point = (
-                Point("voice_complaints")
-                .tag("message_id", message_id)
-                .tag("scenario", scenario)
-                .tag("customer_id", customer_id)
-                .tag("channel", channel_source)
-                .field("transcript", transcript[:5000])
-                .field("neg", sentiment["neg"])
-                .field("neu", sentiment["neu"])
-                .field("pos", sentiment["pos"])
-                .field("compound", sentiment["compound"])
-                .time(datetime.utcnow(), WritePrecision.NS)
-            )
-            write_api.write(bucket=INFLUXDB_BUCKET_VOICE, record=point)
-            logging.info(f"Wrote point for message {message_id}")
-
-            channel.basic_ack(delivery_tag=delivery_tag)
-            logging.info(f"Acknowledged message {message_id}")
-
-        except Exception as e:
-            logging.error("Error processing message:\n%s", traceback.format_exc())
-            try:
-                if channel and channel.is_open and delivery_tag:
-                    channel.basic_nack(delivery_tag=delivery_tag, requeue=False)
-                    logging.info("Rejected message")
-            except Exception as nack_err:
-                logging.warning(f"Failed to nack message: {nack_err}")
-        finally:
-            try:
-                if connection and connection.is_open:
-                    connection.close()
-            except Exception as e:
-                logging.warning(f"Failed to close connection cleanly: {e}")
+    logging.info("Starting consuming...")
+    try:
+        channel.start_consuming()
+    except Exception as e:
+        logging.error(f"Consumer stopped with error: {e}")
+    finally:
+        if channel.is_open:
+            channel.close()
+        if connection.is_open:
+            connection.close()
+        logging.info("Connection closed, exiting")
 
 if __name__ == "__main__":
     main()
