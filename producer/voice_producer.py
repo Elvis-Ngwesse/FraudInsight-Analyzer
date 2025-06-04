@@ -32,7 +32,7 @@ REDIS_PORT = int(os.getenv("REDIS_PORT", 6379))
 
 MAX_RETRIES = 10
 RETRY_DELAY = 2
-MESSAGE_LENGHT = 25
+MESSAGE_LENGHT = 20
 
 # MinIO (S3-compatible) client setup
 s3 = boto3.client(
