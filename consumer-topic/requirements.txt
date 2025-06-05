@@ -1,14 +1,21 @@
+# Messaging & Storage
 pika
 minio
 boto3
-openai-whisper==20231117
-transformers
-torch
-torchaudio
-influxdb-client
-spacy
 
-# Additional requirements for BERTopic
+# Whisper model for speech recognition
+openai-whisper==20231117
+torchaudio
+torch
+
+# NLP
+spacy
+transformers
+
+# InfluxDB client
+influxdb-client
+
+# Topic Modeling (BERTopic & scikit-learn)
 bertopic
 umap-learn
 hdbscan
