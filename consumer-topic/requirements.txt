@@ -7,3 +7,11 @@ torch
 torchaudio
 influxdb-client
 spacy
+
+# Additional requirements for BERTopic
+bertopic
+umap-learn
+hdbscan
+scikit-learn
+pandas
+tqdm

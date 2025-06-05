@@ -84,11 +84,14 @@ def main():
 
         complaint_lines = []
         while len(complaint_lines) < MIN_LINES_PER_COMPLAINT:
-            dialogue = generate_dialogue(customers=customer)
+            dialogue = generate_dialogue(customer)
             lines = [line.strip() for line in dialogue.split('\n') if line.strip()]
             complaint_lines.extend(lines)
 
         complaint_text = "\n".join(complaint_lines[:MIN_LINES_PER_COMPLAINT])
+
+        print(f"\n--- Complaint Text ({len(complaint_lines)} lines) ---\n{complaint_text}\n")
+
         timestamp = time.time()
         message_id = f"text-{customer['id']}-{int(timestamp)}"
 

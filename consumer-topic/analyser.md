@@ -12,10 +12,10 @@ Use case: Identify frustrated or impatient customers, assess agent responsivenes
 
 docker network create app-network
 
-docker compose -f consumer-core-text/docker-compose.yaml up --build
-docker compose -f consumer-core-text/docker-compose.yaml up --scale voice_consumer=2
+docker compose -f consumer-topic/docker-compose.yaml up --build
+docker compose -f consumer-topic/docker-compose.yaml up --scale voice_consumer=2
 
-docker compose -f consumer-core-text/docker-compose.yaml down
+docker compose -f consumer-topic/docker-compose.yaml down
 
 
 get token
