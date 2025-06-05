@@ -5,6 +5,7 @@ import logging
 import tempfile
 import traceback
 import signal
+import re
 from datetime import datetime
 from urllib.parse import urlparse
 
@@ -53,11 +54,10 @@ if not minio_client.bucket_exists(MINIO_BUCKET):
 else:
     logging.info(f"MinIO bucket '{MINIO_BUCKET}' already exists")
 
-whisper_model = WhisperModel("base", compute_type="int8")
+whisper_model = WhisperModel("small", compute_type="int8")  # adjust model size if needed
 
 influx_client = InfluxDBClient(url=INFLUXDB_URL, token=INFLUXDB_TOKEN, org=INFLUXDB_ORG)
 
-# Ensure InfluxDB bucket exists
 buckets_api = influx_client.buckets_api()
 buckets = buckets_api.find_buckets().buckets
 bucket_names = [b.name for b in buckets]
@@ -75,9 +75,28 @@ else:
 
 write_api = influx_client.write_api(write_precision=WritePrecision.NS)
 
+# --- Transcript Cleaning ---
+def clean_transcript(text: str) -> str:
+    # Remove phone numbers (simple pattern)
+    text = re.sub(r'\b(\+?\d{1,3}[-.\s]?)?(\(?\d{3}\)?[-.\s]?)?\d{3}[-.\s]?\d{4}\b', '[PHONE]', text)
+
+    # Remove email addresses
+    text = re.sub(r'\b\S+@\S+\.\S+\b', '[EMAIL]', text)
+
+    # Remove long digit sequences (e.g., IDs)
+    text = re.sub(r'\b\d{6,}\b', '[ID]', text)
+
+    # Normalize commas
+    text = re.sub(r',+', ',', text)
+    text = re.sub(r'([^\w\s]),([^\w\s])', r'\1 \2', text)
+
+    # Remove extra whitespace
+    text = re.sub(r'\s+', ' ', text).strip()
+
+    return text
+
 # --- Functions ---
 def download_audio(object_name):
-    # Remove URL part if full URL given, keep just bucket/object path
     if object_name.startswith("http"):
         parsed_url = urlparse(object_name)
         path_parts = parsed_url.path.lstrip("/").split("/", 1)
@@ -98,7 +117,10 @@ def download_audio(object_name):
 
 def transcribe_audio(file_path):
     segments, _ = whisper_model.transcribe(file_path)
-    return " ".join(segment.text for segment in segments).strip()
+    raw_transcript = " ".join(segment.text for segment in segments).strip()
+    cleaned = clean_transcript(raw_transcript)
+    logging.info(f"Transcription complete. Raw: {raw_transcript[:200]}... Cleaned: {cleaned[:200]}...")
+    return cleaned
 
 def connect_to_rabbitmq():
     params = pika.ConnectionParameters(
@@ -112,13 +134,16 @@ def connect_to_rabbitmq():
     return pika.BlockingConnection(params)
 
 stop_consuming = False
+nack_count = 0
+NACK_WARNING_THRESHOLD = 5
+
 def signal_handler(sig, frame):
     global stop_consuming
     stop_consuming = True
-    logging.info("Stopping consumer...")
+    logging.info("Received termination signal. Stopping consumer...")
 
 def on_message(channel, method, properties, body):
-    global stop_consuming
+    global stop_consuming, nack_count
     delivery_tag = method.delivery_tag
     try:
         msg = json.loads(body)
@@ -129,13 +154,14 @@ def on_message(channel, method, properties, body):
         channel_source = msg.get("channel", "unknown")
 
         if not object_name:
-            raise ValueError("Missing object_name")
+            raise ValueError("Missing 'object_name' in message")
 
         audio_path = download_audio(object_name)
         transcript = transcribe_audio(audio_path)
-        os.remove(audio_path)
-
-        logging.info(f"Message {message_id} transcript: {transcript[:200]}")
+        try:
+            os.remove(audio_path)
+        except Exception as e:
+            logging.warning(f"Could not delete temp file '{audio_path}': {e}")
 
         point = (
             Point("voice_complaints_topic")
@@ -147,11 +173,18 @@ def on_message(channel, method, properties, body):
             .time(datetime.utcnow(), WritePrecision.NS)
         )
         write_api.write(bucket=INFLUXDB_BUCKET_VOICE_TOPIC, record=point)
+
+        logging.info(f"Message {message_id} processed and written to InfluxDB")
+
         channel.basic_ack(delivery_tag=delivery_tag)
     except Exception:
+        nack_count += 1
         logging.error(f"Error processing message:\n{traceback.format_exc()}")
+        if nack_count >= NACK_WARNING_THRESHOLD:
+            logging.warning(f"Number of NACKed messages reached {nack_count}. Investigate potential issues.")
         if channel.is_open:
             channel.basic_nack(delivery_tag=delivery_tag, requeue=False)
+
     if stop_consuming:
         channel.stop_consuming()
 
@@ -159,10 +192,13 @@ def main():
     conn = connect_to_rabbitmq()
     channel = conn.channel()
     channel.basic_qos(prefetch_count=1)
+
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
+
     channel.basic_consume(queue=QUEUE_NAME, on_message_callback=on_message, auto_ack=False)
-    logging.info("Consumer started...")
+
+    logging.info("Consumer started and waiting for messages...")
     try:
         channel.start_consuming()
     finally:
@@ -170,7 +206,7 @@ def main():
             channel.close()
         if conn.is_open:
             conn.close()
-        logging.info("Shutdown complete.")
+        logging.info("Consumer shutdown complete.")
 
 if __name__ == "__main__":
     main()
