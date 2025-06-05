@@ -10,18 +10,18 @@ torch==2.1.2  # Make sure this version is compatible with your CUDA / CPU setup
 
 # NLP
 spacy==3.7.2
-transformers==4.40.1
+transformers>=4.32.0,<5.0.0
+
+
 
 # InfluxDB client
 influxdb-client==1.43.0
 
-# Topic Modeling (BERTopic & dependencies)
-bertopic==0.16.0
-umap-learn==0.5.5
-hdbscan==0.8.33
+# Core NLP / ML tools
 scikit-learn==1.4.2
 pandas==2.2.2
 tqdm==4.66.4
 
-# Sentence Transformers backend for BERTopic
+# Sentence Transformers backend (still kept for potential use)
 sentence-transformers==2.6.1
+faster-whisper==0.10.0
