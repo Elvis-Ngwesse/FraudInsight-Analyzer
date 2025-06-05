@@ -8,15 +8,20 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(mess
 
 
 def generate_customer():
+    amount = round(fake.pyfloat(min_value=500.01, max_value=10000, right_digits=2, positive=True), 2)
     return {
         "id": fake.uuid4(),
         "name": fake.name(),
         "phone": fake.phone_number(),
-        "email": fake.email()
+        "email": fake.email(),
+        "date": fake.date(),
+        "account_number": fake.bban(),
+        "location": fake.city(),
+        "money_amount": f"£{amount}"
     }
 
 
-def generate_dialogue(total_lines=50):
+def generate_dialogue(customers, total_lines=50):
     if total_lines % 2 != 0:
         total_lines += 1
 
@@ -787,10 +792,17 @@ def generate_dialogue(total_lines=50):
             used_bank.append(line)
             dialogue.append(f"Bank Employee: {line}")
 
-    return "\n".join(dialogue)
+    # Format customer info as a string
+    customer_info_text = (
+        f"Customer ID: {customers['id']}\n"
+        f"Name: {customers['name']}\n"
+        f"Phone: {customers['phone']}\n"
+        f"Email: {customers['email']}\n"
+        f"Date: {customers['date']}\n"
+        f"Account Number: {customers['account_number']}\n"
+        f"Location: {customers['location']}\n"
+        f"Money Amount: {customers['money_amount']}\n"
+    )
 
-
-if __name__ == "__main__":
-    customer = generate_customer()
-    print(f"Customer Info: {customer}\n")
-    generate_dialogue(300)
+    # Combine customer info and dialogue lines
+    return f"{customer_info_text}\n" + "\n".join(dialogue)

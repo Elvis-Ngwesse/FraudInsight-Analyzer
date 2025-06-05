@@ -84,7 +84,7 @@ def main():
 
         complaint_lines = []
         while len(complaint_lines) < MIN_LINES_PER_COMPLAINT:
-            dialogue = generate_dialogue()
+            dialogue = generate_dialogue(customers=customer)
             lines = [line.strip() for line in dialogue.split('\n') if line.strip()]
             complaint_lines.extend(lines)
 

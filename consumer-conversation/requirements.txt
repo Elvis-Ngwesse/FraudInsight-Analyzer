@@ -1,0 +1,9 @@
+pika
+minio
+boto3
+openai-whisper==20231117
+transformers
+torch
+torchaudio
+influxdb-client
+spacy

@@ -9,7 +9,7 @@ import redis
 import tempfile
 from datetime import datetime
 from TTS.api import TTS
-from utils import generate_dialogue  # your own module
+from utils import generate_customer, generate_dialogue
 
 # Setup logging
 logging.basicConfig(
@@ -141,6 +141,7 @@ def generate_and_upload_audio(dialogue_lines, audio_id):
 
 
 def main():
+    customer = generate_customer()
     channel = connect_to_rabbitmq()
     redis_client = connect_to_redis()
 
@@ -151,7 +152,7 @@ def main():
         audio_id = f"voice-{uuid.uuid4()}-{int(time.time())}"
         logging.info(f"[{i + 1}/2000] Creating voice complaint for scenario: '{scenario}', ID: {audio_id}")
 
-        dialogue_text = generate_dialogue(MESSAGE_LENGHT)
+        dialogue_text = generate_dialogue(customers=customer, total_lines=MESSAGE_LENGHT)
         logging.info(f"[Dialogue] Generated {MESSAGE_LENGHT}-line dialogue for scenario: {scenario}")
 
         audio_url = generate_and_upload_audio(dialogue_text.splitlines(), audio_id)

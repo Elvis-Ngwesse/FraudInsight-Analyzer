@@ -2,7 +2,6 @@ version: "3.8"
 
 services:
   influxdb:
-    container_name: influxdb
     image: influxdb:2.6
     ports:
       - "8086:8086"
@@ -40,7 +39,6 @@ services:
     restart: unless-stopped
 
   postgres-metabase:
-    container_name: postgres-metabase
     image: postgres:15
     environment:
       POSTGRES_USER: metabase
@@ -53,7 +51,6 @@ services:
     restart: unless-stopped
 
   metabase:
-    container_name: metabase
     image: metabase/metabase
     platform: linux/amd64
     ports:
@@ -73,7 +70,6 @@ services:
     restart: unless-stopped
 
   text_consumer:
-    container_name: text_consumer
     build:
       context: .
       dockerfile: Dockerfile
@@ -98,7 +94,6 @@ services:
     restart: unless-stopped
 
   voice_consumer:
-    container_name: voice_consumer
     build:
       context: .
       dockerfile: Dockerfile
