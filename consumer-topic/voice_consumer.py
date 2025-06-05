@@ -54,10 +54,12 @@ if not minio_client.bucket_exists(MINIO_BUCKET):
 else:
     logging.info(f"MinIO bucket '{MINIO_BUCKET}' already exists")
 
-whisper_model = WhisperModel("small", compute_type="int8")  # adjust model size if needed
+# Use a bigger Whisper model for better transcription quality
+whisper_model = WhisperModel("small", compute_type="int8")  # Change to "medium" or "large" if needed
 
 influx_client = InfluxDBClient(url=INFLUXDB_URL, token=INFLUXDB_TOKEN, org=INFLUXDB_ORG)
 
+# Ensure InfluxDB bucket exists
 buckets_api = influx_client.buckets_api()
 buckets = buckets_api.find_buckets().buckets
 bucket_names = [b.name for b in buckets]
@@ -77,26 +79,38 @@ write_api = influx_client.write_api(write_precision=WritePrecision.NS)
 
 # --- Transcript Cleaning ---
 def clean_transcript(text: str) -> str:
-    # Remove phone numbers (simple pattern)
-    text = re.sub(r'\b(\+?\d{1,3}[-.\s]?)?(\(?\d{3}\)?[-.\s]?)?\d{3}[-.\s]?\d{4}\b', '[PHONE]', text)
+    """Clean transcript text by removing sensitive data and noise."""
 
-    # Remove email addresses
-    text = re.sub(r'\b\S+@\S+\.\S+\b', '[EMAIL]', text)
+    # Remove phone numbers (various common formats, international and US)
+    phone_pattern = re.compile(
+        r'''(
+            (\+?\d{1,3}[\s.-]?)?              # optional country code
+            (\(?\d{3}\)?[\s.-]?)?             # optional area code
+            \d{3}[\s.-]?\d{4}                 # main number
+            (\s?(ext|x|extension)\s?\d{1,5})? # optional extension
+        )''', re.VERBOSE)
+    text = phone_pattern.sub('[PHONE]', text)
 
-    # Remove long digit sequences (e.g., IDs)
+    # Remove email addresses (improved)
+    email_pattern = re.compile(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b')
+    text = email_pattern.sub('[EMAIL]', text)
+
+    # Remove long digit sequences (e.g., IDs, account numbers)
     text = re.sub(r'\b\d{6,}\b', '[ID]', text)
 
-    # Normalize commas
+    # Replace multiple commas with single comma
     text = re.sub(r',+', ',', text)
+    # Separate misplaced commas surrounded by non-word characters
     text = re.sub(r'([^\w\s]),([^\w\s])', r'\1 \2', text)
 
-    # Remove extra whitespace
+    # Trim extra spaces
     text = re.sub(r'\s+', ' ', text).strip()
 
     return text
 
 # --- Functions ---
 def download_audio(object_name):
+    # Parse full URL or object name to bucket and object key
     if object_name.startswith("http"):
         parsed_url = urlparse(object_name)
         path_parts = parsed_url.path.lstrip("/").split("/", 1)
@@ -115,24 +129,6 @@ def download_audio(object_name):
         logging.info(f"Downloaded object '{obj}' from bucket '{bucket}' to '{tmp_file.name}'")
         return tmp_file.name
 
-def transcribe_audio(file_path):
-    segments, _ = whisper_model.transcribe(file_path)
-    raw_transcript = " ".join(segment.text for segment in segments).strip()
-    cleaned = clean_transcript(raw_transcript)
-    logging.info(f"Transcription complete. Raw: {raw_transcript[:200]}... Cleaned: {cleaned[:200]}...")
-    return cleaned
-
-def connect_to_rabbitmq():
-    params = pika.ConnectionParameters(
-        host=RABBITMQ_HOST,
-        port=RABBITMQ_PORT,
-        virtual_host=RABBITMQ_VHOST,
-        credentials=pika.PlainCredentials(RABBITMQ_USER, RABBITMQ_PASS),
-        heartbeat=60,
-        blocked_connection_timeout=600
-    )
-    return pika.BlockingConnection(params)
-
 stop_consuming = False
 nack_count = 0
 NACK_WARNING_THRESHOLD = 5
@@ -145,6 +141,7 @@ def signal_handler(sig, frame):
 def on_message(channel, method, properties, body):
     global stop_consuming, nack_count
     delivery_tag = method.delivery_tag
+    audio_path = None
     try:
         msg = json.loads(body)
         message_id = msg.get("id", "unknown")
@@ -157,11 +154,26 @@ def on_message(channel, method, properties, body):
             raise ValueError("Missing 'object_name' in message")
 
         audio_path = download_audio(object_name)
-        transcript = transcribe_audio(audio_path)
-        try:
-            os.remove(audio_path)
-        except Exception as e:
-            logging.warning(f"Could not delete temp file '{audio_path}': {e}")
+
+        segments, info = whisper_model.transcribe(audio_path)
+        # Log audio duration if available
+        duration_seconds = None
+        if info and isinstance(info, dict):
+            duration_seconds = info.get('duration', None)
+        if duration_seconds:
+            minutes = int(duration_seconds // 60)
+            seconds = duration_seconds % 60
+            logging.info(f"Processing audio with duration {minutes:02d}:{seconds:05.2f}")
+        # Log detected language if available
+        language = None
+        if info and isinstance(info, dict):
+            language = info.get('language', None)
+        if language:
+            logging.info(f"Detected language '{language}'")
+
+        raw_transcript = " ".join(segment.text for segment in segments).strip()
+        cleaned = clean_transcript(raw_transcript)
+        logging.info(f"Transcription complete. Raw: {raw_transcript[:200]}... Cleaned: {cleaned[:200]}...")
 
         point = (
             Point("voice_complaints_topic")
@@ -169,7 +181,7 @@ def on_message(channel, method, properties, body):
             .tag("scenario", scenario)
             .tag("customer_id", customer_id)
             .tag("channel", channel_source)
-            .field("transcript", transcript[:5000])
+            .field("transcript", cleaned[:5000])
             .time(datetime.utcnow(), WritePrecision.NS)
         )
         write_api.write(bucket=INFLUXDB_BUCKET_VOICE_TOPIC, record=point)
@@ -184,9 +196,24 @@ def on_message(channel, method, properties, body):
             logging.warning(f"Number of NACKed messages reached {nack_count}. Investigate potential issues.")
         if channel.is_open:
             channel.basic_nack(delivery_tag=delivery_tag, requeue=False)
+    finally:
+        # Ensure cleanup of temp file
+        if audio_path and os.path.exists(audio_path):
+            os.remove(audio_path)
 
     if stop_consuming:
         channel.stop_consuming()
+
+def connect_to_rabbitmq():
+    params = pika.ConnectionParameters(
+        host=RABBITMQ_HOST,
+        port=RABBITMQ_PORT,
+        virtual_host=RABBITMQ_VHOST,
+        credentials=pika.PlainCredentials(RABBITMQ_USER, RABBITMQ_PASS),
+        heartbeat=60,
+        blocked_connection_timeout=600
+    )
+    return pika.BlockingConnection(params)
 
 def main():
     conn = connect_to_rabbitmq()
