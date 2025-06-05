@@ -13,7 +13,7 @@ from urllib.parse import urlparse
 from minio import Minio
 import whisper
 from bertopic import BERTopic
-from influxdb_client import InfluxDBClient, Point, WritePrecision
+from influxdb_client import InfluxDBClient, Point, WritePrecision, BucketRetentionRules
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
 
@@ -54,6 +54,14 @@ minio_client = Minio(
     secure=False,
 )
 
+# Ensure MinIO bucket exists
+found = minio_client.bucket_exists(MINIO_BUCKET)
+if not found:
+    minio_client.make_bucket(MINIO_BUCKET)
+    logging.info(f"Created MinIO bucket '{MINIO_BUCKET}'")
+else:
+    logging.info(f"MinIO bucket '{MINIO_BUCKET}' already exists")
+
 whisper_model = whisper.load_model("base")
 
 topic_model_path = "bertopic_model"
@@ -71,6 +79,16 @@ influx_client = InfluxDBClient(
     org=INFLUXDB_ORG
 )
 write_api = influx_client.write_api(write_precision=WritePrecision.NS)
+
+# Ensure InfluxDB bucket exists
+buckets_api = influx_client.buckets_api()
+buckets = buckets_api.find_buckets().buckets
+if not any(b.name == INFLUXDB_BUCKET_VOICE_TOPIC for b in buckets):
+    retention = BucketRetentionRules(type="expire", every_seconds=0)
+    buckets_api.create_bucket(bucket_name=INFLUXDB_BUCKET_VOICE_TOPIC, org=INFLUXDB_ORG, retention_rules=retention)
+    logging.info(f"Created InfluxDB bucket '{INFLUXDB_BUCKET_VOICE_TOPIC}'")
+else:
+    logging.info(f"InfluxDB bucket '{INFLUXDB_BUCKET_VOICE_TOPIC}' already exists")
 
 # --- Download and Validate Audio from MinIO ---
 def download_audio(object_name):

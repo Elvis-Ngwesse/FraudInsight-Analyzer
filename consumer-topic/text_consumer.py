@@ -44,15 +44,29 @@ def connect_to_rabbitmq():
     )
     return pika.BlockingConnection(params)
 
+def ensure_bucket_exists(client, bucket_name, org_name):
+    try:
+        bucket = client.buckets_api().find_bucket_by_name(bucket_name)
+        if bucket is None:
+            logging.info(f"Bucket '{bucket_name}' not found. Creating it...")
+            client.buckets_api().create_bucket(bucket_name=bucket_name, org=org_name)
+            logging.info(f"Bucket '{bucket_name}' created.")
+        else:
+            logging.info(f"Bucket '{bucket_name}' already exists.")
+    except Exception as e:
+        logging.error(f"Failed to verify/create bucket '{bucket_name}': {e}")
+
 def main():
     global write_api, vectorizer, lda_model
 
     influx_client = InfluxDBClient(url=INFLUXDB_URL, token=INFLUXDB_TOKEN, org=INFLUXDB_ORG)
+    ensure_bucket_exists(influx_client, INFLUXDB_BUCKET_TEXT_TOPIC, INFLUXDB_ORG)
     write_api = influx_client.write_api(write_precision=WritePrecision.NS)
 
     vectorizer = CountVectorizer(stop_words="english", max_features=1000)
     lda_model = None
     fit_buffer = []
+    consumed_message_count = 0
 
     conn = connect_to_rabbitmq()
     channel = conn.channel()
@@ -87,18 +101,20 @@ def main():
                 if not complaint_text.strip():
                     logging.warning(f"Empty complaint text for message {message_id}")
                     channel.basic_ack(delivery_tag=method_frame.delivery_tag)
+                    consumed_message_count += 1
+                    logging.info(f"Total consumed messages: {consumed_message_count}")
                     continue
 
-                # Buffer to gather documents to fit LDA
                 fit_buffer.append(complaint_text)
 
-                # Train model when we have at least 5 documents
                 if lda_model is None and len(fit_buffer) >= 5:
                     X_train = vectorizer.fit_transform(fit_buffer)
                     lda_model = LatentDirichletAllocation(n_components=5, random_state=42)
                     lda_model.fit(X_train)
                     logging.info("LDA model fitted with first 5 messages.")
                     channel.basic_ack(delivery_tag=method_frame.delivery_tag)
+                    consumed_message_count += 1
+                    logging.info(f"Total consumed messages: {consumed_message_count}")
                     continue
 
                 if lda_model:
@@ -128,6 +144,8 @@ def main():
                     logging.info(f"Processed {message_id} -> topic {topic_id} with words [{topic_keywords}]")
 
                 channel.basic_ack(delivery_tag=method_frame.delivery_tag)
+                consumed_message_count += 1
+                logging.info(f"Total consumed messages: {consumed_message_count}")
 
             except Exception:
                 logging.error("Error processing message:\n" + traceback.format_exc())
