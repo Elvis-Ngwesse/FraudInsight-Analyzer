@@ -14,7 +14,10 @@ from minio import Minio
 import whisper
 from bertopic import BERTopic
 from influxdb_client import InfluxDBClient, Point, WritePrecision, BucketRetentionRules
+from sentence_transformers import SentenceTransformer
+import joblib
 
+# --- Logging ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
 
 # --- Utility ---
@@ -54,9 +57,7 @@ minio_client = Minio(
     secure=False,
 )
 
-# Ensure MinIO bucket exists
-found = minio_client.bucket_exists(MINIO_BUCKET)
-if not found:
+if not minio_client.bucket_exists(MINIO_BUCKET):
     minio_client.make_bucket(MINIO_BUCKET)
     logging.info(f"Created MinIO bucket '{MINIO_BUCKET}'")
 else:
@@ -66,12 +67,13 @@ whisper_model = whisper.load_model("base")
 
 topic_model_path = "bertopic_model"
 if os.path.exists(topic_model_path):
-    import joblib
     topic_model = joblib.load(topic_model_path)
     logging.info("Loaded BERTopic model from disk.")
 else:
-    topic_model = BERTopic(language="english", calculate_probabilities=True)
-    logging.warning("No BERTopic model found. Using untrained model; fit before use.")
+    logging.warning("No BERTopic model found. Creating an untrained one.")
+    embedding_model = SentenceTransformer("all-mpnet-base-v2")
+    topic_model = BERTopic(embedding_model=embedding_model, language="english", calculate_probabilities=True)
+    logging.warning("Model is untrained. Fit and save it using joblib to 'bertopic_model' before use.")
 
 influx_client = InfluxDBClient(
     url=INFLUXDB_URL_LOCAL,
@@ -80,7 +82,6 @@ influx_client = InfluxDBClient(
 )
 write_api = influx_client.write_api(write_precision=WritePrecision.NS)
 
-# Ensure InfluxDB bucket exists
 buckets_api = influx_client.buckets_api()
 buckets = buckets_api.find_buckets().buckets
 if not any(b.name == INFLUXDB_BUCKET_VOICE_TOPIC for b in buckets):
@@ -90,33 +91,24 @@ if not any(b.name == INFLUXDB_BUCKET_VOICE_TOPIC for b in buckets):
 else:
     logging.info(f"InfluxDB bucket '{INFLUXDB_BUCKET_VOICE_TOPIC}' already exists")
 
-# --- Download and Validate Audio from MinIO ---
 def download_audio(object_name):
     if object_name.startswith("http://") or object_name.startswith("https://"):
-        parsed = urlparse(object_name)
-        object_name = parsed.path.lstrip("/")
-        logging.info(f"Extracted object name from URL: {object_name}")
-
+        object_name = urlparse(object_name).path.lstrip("/")
+        logging.info(f"Parsed object name: {object_name}")
     try:
         stat = minio_client.stat_object(MINIO_BUCKET, object_name)
-        logging.info(f"Object '{object_name}' found in bucket '{MINIO_BUCKET}', size: {stat.size} bytes")
-
+        logging.info(f"Object '{object_name}' found, size: {stat.size} bytes")
         with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp_file:
             minio_client.fget_object(MINIO_BUCKET, object_name, tmp_file.name)
-            logging.info(f"Downloaded audio '{object_name}' to '{tmp_file.name}'")
-
+            logging.info(f"Downloaded audio to '{tmp_file.name}'")
             if os.path.getsize(tmp_file.name) == 0:
                 raise Exception("Downloaded file is empty")
-
             with wave.open(tmp_file.name, "rb") as wav_file:
-                logging.info(f"WAV file params: channels={wav_file.getnchannels()}, "
-                             f"framerate={wav_file.getframerate()}, frames={wav_file.getnframes()}")
-
+                logging.info(f"WAV params: channels={wav_file.getnchannels()}, framerate={wav_file.getframerate()}")
             return tmp_file.name
     except Exception as e:
-        raise Exception(f"Download or validation failed: {e}")
+        raise Exception(f"Download failed: {e}")
 
-# --- Predict topic with BERTopic ---
 def predict_topic(text):
     if not text:
         return -1, "No transcript", 0.0
@@ -130,10 +122,9 @@ def predict_topic(text):
         words = [w for w, _ in topic_name]
         return topic_id, ", ".join(words[:5]), prob
     except Exception as e:
-        logging.warning(f"BERTopic prediction failed: {e}")
-        return -1, "Topic error", 0.0
+        logging.warning(f"BERTopic error: {e}")
+        return -1, "Error", 0.0
 
-# --- RabbitMQ Connection ---
 def connect_to_rabbitmq():
     parameters = pika.ConnectionParameters(
         host=RABBITMQ_HOST_LOCAL,
@@ -146,55 +137,49 @@ def connect_to_rabbitmq():
         retry_delay=RETRY_DELAY,
         socket_timeout=600,
     )
-    delay = RETRY_DELAY
     for attempt in range(1, MAX_RETRIES + 1):
         try:
             logging.info(f"Connecting to RabbitMQ (attempt {attempt})...")
             conn = pika.BlockingConnection(parameters)
-            logging.info("Connected to RabbitMQ.")
+            logging.info("Connected.")
             return conn
         except pika.exceptions.AMQPConnectionError as e:
-            logging.warning(f"RabbitMQ not ready: {e}. Retrying in {delay}s...")
-            time.sleep(delay)
-            delay = min(delay * 2, 60)
-    raise ConnectionError("Failed to connect to RabbitMQ after max retries")
+            logging.warning(f"RabbitMQ error: {e}, retrying in {RETRY_DELAY}s")
+            time.sleep(RETRY_DELAY)
+    raise ConnectionError("RabbitMQ unavailable after retries")
 
 stop_consuming = False
 def signal_handler(sig, frame):
     global stop_consuming
-    logging.info("Signal received, stopping consumer...")
+    logging.info("Interrupt received, stopping consumer...")
     stop_consuming = True
 
-# --- Callback ---
 def on_message(channel, method, properties, body):
     global stop_consuming
     delivery_tag = method.delivery_tag
     try:
         message = json.loads(body)
-        message_id = message.get("id") or message.get("message_id") or "unknown"
+        message_id = message.get("id", "unknown")
         object_name = message.get("object_name")
         scenario = message.get("scenario", "unknown")
         customer_id = message.get("customer_id", "unknown")
         channel_source = message.get("channel", "unknown")
 
-        logging.info(f"Received message {message_id} for scenario '{scenario}'")
+        logging.info(f"Processing message {message_id} from scenario '{scenario}'")
 
         if not object_name:
-            raise ValueError("Missing 'object_name' in message")
+            raise ValueError("No object_name in message")
 
         audio_path = download_audio(object_name)
         result = whisper_model.transcribe(audio_path)
         transcript = result.get("text", "").strip()
-        try:
-            os.remove(audio_path)
-        except Exception:
-            logging.warning(f"Failed to delete temp audio file {audio_path}")
+        os.remove(audio_path)
 
         if not transcript:
-            raise ValueError(f"Empty transcript for message {message_id}")
+            raise ValueError(f"No transcript for message {message_id}")
 
         topic_id, topic_summary, topic_prob = predict_topic(transcript)
-        logging.info(f"Predicted topic {topic_id}: {topic_summary} (prob={topic_prob:.3f})")
+        logging.info(f"Topic {topic_id}: {topic_summary} ({topic_prob:.3f})")
 
         point = (
             Point("voice_complaints_topic")
@@ -210,44 +195,39 @@ def on_message(channel, method, properties, body):
         )
 
         write_api.write(bucket=INFLUXDB_BUCKET_VOICE_TOPIC, record=point)
-        logging.info(f"Wrote topic modeling data for message {message_id}")
+        logging.info(f"Stored result for message {message_id}")
         channel.basic_ack(delivery_tag=delivery_tag)
-        logging.info(f"Acknowledged message {message_id}")
-
     except Exception:
         logging.error("Error processing message:\n%s", traceback.format_exc())
         if channel.is_open:
             try:
                 channel.basic_nack(delivery_tag=delivery_tag, requeue=False)
-                logging.info(f"Rejected message {delivery_tag}")
             except Exception as nack_err:
-                logging.warning(f"Failed to nack message: {nack_err}")
-
+                logging.warning(f"Failed to nack: {nack_err}")
     if stop_consuming:
         channel.stop_consuming()
 
-# --- Main ---
 def main():
     connection = connect_to_rabbitmq()
     channel = connection.channel()
-
-    # Do not declare the queue, only consume it
     channel.basic_qos(prefetch_count=1)
+
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
-    channel.basic_consume(queue=QUEUE_NAME, on_message_callback=on_message, auto_ack=False)
 
-    logging.info(f"Waiting for messages on queue '{QUEUE_NAME}'. To exit press CTRL+C")
+    channel.basic_consume(queue=QUEUE_NAME, on_message_callback=on_message, auto_ack=False)
+    logging.info(f"Listening on queue '{QUEUE_NAME}'...")
+
     try:
         channel.start_consuming()
     except Exception as e:
-        logging.error(f"Consumer stopped with error: {e}")
+        logging.error(f"Consumer stopped: {e}")
     finally:
         if channel.is_open:
             channel.close()
         if connection.is_open:
             connection.close()
-        logging.info("Connection closed, exiting")
+        logging.info("Shutdown complete.")
 
 if __name__ == "__main__":
     main()
