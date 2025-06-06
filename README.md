@@ -23,3 +23,20 @@ Select the bucket(s) and permissions if creating a scoped token.
 Click Save.
 Copy the generated token — this is your InfluxDB token.
 paste in .env file INFLUXDB_TOKEN={generated token}
+
+influxdb cli
+brew update
+brew install influxdb
+brew install influxdb-cli
+
+choco install influxdb-cli
+
+influx version
+
+set config
+influx config create \
+--config-name default \
+--host-url http://localhost:8086 \
+--org org \
+--token eyJhbGciOi... \
+--active
