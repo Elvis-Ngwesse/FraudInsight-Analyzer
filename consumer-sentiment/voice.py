@@ -1,15 +1,9 @@
-# Install necessary packages if you haven't already (run this once)
-# !pip install influxdb-client matplotlib pandas
 
 from influxdb_client import InfluxDBClient
-from influxdb_client.client.query_api import QueryApi
 import pandas as pd
 import matplotlib.pyplot as plt
-from datetime import datetime, timedelta
 
 # --- Setup InfluxDB Client ---
-
-# Replace these with your real environment values
 INFLUXDB_URL = "http://localhost:8086"
 INFLUXDB_TOKEN = "cKx4XPuKuHnD5xyvWhxfji3lweLK7X0fRfdidS8wlhiyPxEmk8l-WSyOhx3gXzNIBr8LonzD7OuuYY_5xGpPxw=="
 INFLUXDB_ORG = "org"
@@ -27,7 +21,7 @@ query_api = client.query_api()
 
 flux_query = f'''
 from(bucket: "{INFLUXDB_BUCKET}")
-  |> range(start: -5h)
+  |> range(start: -12h)
   |> filter(fn: (r) => r._measurement == "voice_complaints")
   |> filter(fn: (r) => r._field == "neg" or r._field == "neu" or r._field == "pos" or r._field == "compound")
   |> pivot(rowKey:["_time"], columnKey: ["_field"], valueColumn: "_value")
