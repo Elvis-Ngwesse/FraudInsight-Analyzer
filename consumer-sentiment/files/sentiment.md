@@ -1,23 +1,5 @@
-1. Sentiment Classification
-   Analyze the overall emotional polarity of the text into positive, neutral, negative, and compound scores.
-Negativity (negative sentiment proportion)
-Neutrality (neutral sentiment proportion)
-Positivity (positive sentiment proportion)
-Compound (aggregate score from -1 [most negative] to +1 [most positive])
-Tool: VADER (Valence Aware Dictionary and sEntiment Reasoner) from NLTK
-Use case:
-Identify highly negative or positive customer feedback
-Prioritize complaints for escalation based on sentiment
-Monitor customer satisfaction trends over time and scenarios
-Train customer support agents based on sentiment patterns
 
 
-
-docker network create app-network
-docker compose -f consumer-sentiment/docker-compose.yaml up --build
-docker compose -f consumer-sentiment/docker-compose.yaml up --scale voice_consumer=2
-
-docker compose -f consumer-sentiment/docker-compose.yaml down
 
 
 get token
@@ -29,15 +11,7 @@ Login with your username and password (the admin user you created during initial
 Once logged in, go to "Load Data" > "Tokens" on the left sidebar
 
 
-query influxdb
-macos
-- brew install influxdb-cli
-- brew install influxdb
-- brew link --overwrite influxdb
-- which influx
-- influx version
-windows
-- choco install influxdb
+
 influx query '
 from(bucket: "voice_bucket")
 |> range(start: -1h)

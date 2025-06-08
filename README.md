@@ -11,6 +11,16 @@ docker --version
 activate virtual env
 - steps on how to do this on fraud_analyser.md
 
+influxdb cli
+brew update
+brew install influxdb
+brew install influxdb-cli
+
+choco install influxdb-cli
+
+influx version
+
+
 Generate Token
 Log in to your InfluxDB UI (typically at http://localhost:8086 or your InfluxDB Cloud URL).
 Go to the Data section in the left sidebar.
@@ -24,14 +34,6 @@ Click Save.
 Copy the generated token — this is your InfluxDB token.
 paste in .env file INFLUXDB_TOKEN={generated token}
 
-influxdb cli
-brew update
-brew install influxdb
-brew install influxdb-cli
-
-choco install influxdb-cli
-
-influx version
 
 set config
 influx config create \
@@ -40,3 +42,5 @@ influx config create \
 --org org \
 --token eyJhbGciOi... \
 --active
+
+influx config rm default
