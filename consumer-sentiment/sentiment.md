@@ -1,17 +1,17 @@
 
 ## 🧠 Sentiment Analysis with VADER
-This section explains how to use the **VADER (Valence Aware Dictionary and sEntiment Reasoner)** 
-sentiment analysis tool to evaluate the **emotional tone** of customer complaint transcripts. 
-It is part of a larger audio processing pipeline that transcribes voice messages and stores 
+This section explains how to use the **VADER (Valence Aware Dictionary and sEntiment Reasoner)**
+sentiment analysis tool to evaluate the **emotional tone** of customer complaint transcripts.
+It is part of a larger audio processing pipeline that transcribes voice messages and stores
 analysis results in a time-series database.
 ---
 ## 🎯 Objective
-To **automatically detect emotional tone** in a customer's voice complaint using text transcription 
-and VADER sentiment analysis. This enables downstream systems to act on **customer mood**, **anger**, 
+To **automatically detect emotional tone** in a customer's voice complaint using text transcription
+and VADER sentiment analysis. This enables downstream systems to act on **customer mood**, **anger**,
 or **satisfaction**.
 ---
 ## 📚 What is VADER?
-VADER is a **lexicon and rule-based** sentiment analysis tool built especially for **short texts** 
+VADER is a **lexicon and rule-based** sentiment analysis tool built especially for **short texts**
 like social media posts, dialogues, and reviews.
 > ✅ No model training required  
 > ✅ Fast and lightweight  
@@ -76,23 +76,15 @@ docker compose -f consumer-sentiment/docker-compose.yaml down
 - Go to README.md
 - set config
 
-## Query InfluxDB
-
-influx query 'from(bucket: "voice_bucket")
-|> range(start: -10m)
-|> filter(fn: (r) => r._measurement == "voice_complaints")
-|> filter(fn: (r) => r._field == "neg" or r._field == "neu" or r._field == "pos" or r._field == "compound")
-|> pivot(rowKey:["_time"], columnKey: ["_field"], valueColumn: "_value")
-|> sort(columns: ["_time"], desc: true)
-|> limit(n: 1)'
-
-
+## Query InfluxDB and Display graph
 Make sure you have installed required packages
-pip install notebook influxdb-client matplotlib pandas
+- pip install notebook influxdb-client matplotlib pandas
+- pip install seaborn
 
 Replace the placeholder values
-INFLUXDB_TOKEN = "your-influxdb-token"            # Your InfluxDB access token
+- INFLUXDB_TOKEN = "your-influxdb-token"
+- bucket_type = "voice"
 
 Run the code
-python consumer-sentiment/voice.py
+- python consumer-sentiment/sentiment.py
 
