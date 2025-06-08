@@ -24,20 +24,6 @@ services:
       - producer_app-network
     restart: unless-stopped
 
-  grafana:
-    container_name: grafana
-    image: grafana/grafana
-    ports:
-      - "3000:3000"
-    volumes:
-      - grafana-storage:/var/lib/grafana
-    environment:
-      - GF_SECURITY_ADMIN_USER=${GF_SECURITY_ADMIN_USER}
-      - GF_SECURITY_ADMIN_PASSWORD=${GF_SECURITY_ADMIN_PASSWORD}
-    networks:
-      - producer_app-network
-    restart: unless-stopped
-
   postgres-metabase:
     image: postgres:15
     environment:
