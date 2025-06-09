@@ -210,7 +210,7 @@ def connect_to_rabbitmq():
         port=RABBITMQ_PORT,
         virtual_host=RABBITMQ_VHOST,
         credentials=pika.PlainCredentials(RABBITMQ_USER, RABBITMQ_PASS),
-        heartbeat=60,
+        heartbeat=30,
         blocked_connection_timeout=600
     )
     return pika.BlockingConnection(params)

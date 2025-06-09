@@ -125,7 +125,6 @@ networks:
     external: true
 
 volumes:
-  grafana-storage:
   influxdb-storage:
   metabase-data:
   postgres-metabase-data:
