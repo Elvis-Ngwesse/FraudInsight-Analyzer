@@ -3,19 +3,29 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 import seaborn as sns
+from dotenv import load_dotenv
+import os
 
-# Set seaborn style for better aesthetics
+# --- Load environment variables ---
+load_dotenv()
+
+
+# --- Plot Config ---
+plot_time_series = True
+plot_mean_sentiment = False
+plot_distribution = False
+plot_by_scenario = False
+plot_volume_and_sentiment = False
+
+# --- Aesthetics ---
 sns.set(style="darkgrid")
 
-# --- Configurable Settings ---
+# --- Config ---
 INFLUXDB_URL = "http://localhost:8086"
-INFLUXDB_TOKEN = "cKx4XPuKuHnD5xyvWhxfji3lweLK7X0fRfdidS8wlhiyPxEmk8l-WSyOhx3gXzNIBr8LonzD7OuuYY_5xGpPxw=="
+INFLUXDB_TOKEN = os.getenv("INFLUXDB_TOKEN")
 INFLUXDB_ORG = "org"
 
-# --- Choose between 'text' or 'voice' ---
-bucket_type = "voice"  # Change to "voice" to switch datasets
-
-# Set bucket and measurement based on type
+bucket_type = "voice"  # 'text' or 'voice'
 if bucket_type == "voice":
     INFLUXDB_BUCKET = "voice_bucket"
     measurement = "voice_complaints"
@@ -25,12 +35,7 @@ elif bucket_type == "text":
 else:
     raise ValueError("bucket_type must be either 'text' or 'voice'")
 
-# --- Connect to InfluxDB ---
-client = InfluxDBClient(
-    url=INFLUXDB_URL,
-    token=INFLUXDB_TOKEN,
-    org=INFLUXDB_ORG
-)
+client = InfluxDBClient(url=INFLUXDB_URL, token=INFLUXDB_TOKEN, org=INFLUXDB_ORG)
 query_api = client.query_api()
 
 # --- Flux Query ---
@@ -41,10 +46,10 @@ from(bucket: "{INFLUXDB_BUCKET}")
   |> filter(fn: (r) => r._field == "neg" or r._field == "neu" or r._field == "pos" or r._field == "compound")
   |> pivot(rowKey:["_time"], columnKey: ["_field"], valueColumn: "_value")
   |> sort(columns: ["_time"])
-  |> limit(n: 40)
+  |> limit(n: 200)
 '''
 
-# --- Query and Format ---
+# --- Fetch and Format ---
 tables = query_api.query(flux_query)
 results = []
 for table in tables:
@@ -55,34 +60,74 @@ for table in tables:
             "neu": record.values.get("neu"),
             "pos": record.values.get("pos"),
             "compound": record.values.get("compound"),
+            "scenario": record.values.get("scenario", "unknown"),
         })
 
 df = pd.DataFrame(results)
-
 if df.empty:
-    print("No data found for the given query.")
+    print("No data found.")
     exit()
 
 df["time"] = pd.to_datetime(df["time"])
 
-# --- Plot ---
-plt.figure(figsize=(12, 7))
+# --- Plotting Section ---
 
-plt.plot(df["time"], df["neg"], label="Negative", color='red', linestyle='-', marker='o', markersize=5, markevery=4)
-plt.plot(df["time"], df["neu"], label="Neutral", color='gray', linestyle='--', marker='s', markersize=5, markevery=4)
-plt.plot(df["time"], df["pos"], label="Positive", color='green', linestyle='-.', marker='^', markersize=5, markevery=4)
-plt.plot(df["time"], df["compound"], label="Compound", color='blue', linestyle=':', marker='d', markersize=5, markevery=4)
+if plot_time_series:
+    plt.figure(figsize=(12, 7))
+    plt.plot(df["time"], df["neg"], label="Negative", color='red', marker='o', markevery=4)
+    plt.plot(df["time"], df["neu"], label="Neutral", color='gray', linestyle='--', marker='s', markevery=4)
+    plt.plot(df["time"], df["pos"], label="Positive", color='green', linestyle='-.', marker='^', markevery=4)
+    plt.plot(df["time"], df["compound"], label="Compound", color='blue', linestyle=':', marker='d', markevery=4)
+    plt.title(f"Sentiment Over Time ({bucket_type.title()} Complaints)")
+    plt.xlabel("Timestamp")
+    plt.ylabel("Sentiment Score")
+    plt.ylim(-1, 1)
+    plt.legend()
+    plt.grid(True)
+    plt.gca().xaxis.set_major_locator(mdates.AutoDateLocator())
+    plt.gca().xaxis.set_major_formatter(mdates.DateFormatter('%H:%M:%S'))
+    plt.xticks(rotation=45, ha='right')
+    plt.tight_layout()
+    plt.show()
 
-plt.title(f"Sentiment Analysis Scores Over Time ({bucket_type.title()} Complaints)")
-plt.xlabel("Timestamp")
-plt.ylabel("Sentiment Score")
-plt.ylim(-1, 1)
-plt.legend()
-plt.grid(True)
+if plot_mean_sentiment:
+    mean_values = df[["neg", "neu", "pos", "compound"]].mean()
+    mean_values.plot(kind="bar", color=["red", "gray", "green", "blue"], title="Mean Sentiment Scores")
+    plt.ylim(-1, 1)
+    plt.ylabel("Score")
+    plt.tight_layout()
+    plt.show()
 
-plt.gca().xaxis.set_major_locator(mdates.AutoDateLocator())
-plt.gca().xaxis.set_major_formatter(mdates.DateFormatter('%H:%M:%S'))
-plt.xticks(rotation=45, ha='right')
+if plot_distribution:
+    plt.figure(figsize=(10, 6))
+    sns.boxplot(data=df[["neg", "neu", "pos", "compound"]])
+    plt.title("Sentiment Score Distribution")
+    plt.ylim(-1, 1)
+    plt.tight_layout()
+    plt.show()
 
-plt.tight_layout()
-plt.show()
+if plot_by_scenario and "scenario" in df.columns:
+    grouped = df.groupby("scenario")[["neg", "neu", "pos", "compound"]].mean()
+    grouped.plot(kind="bar", figsize=(12, 6), colormap="coolwarm", title="Average Sentiment per Scenario")
+    plt.ylabel("Sentiment Score")
+    plt.ylim(-1, 1)
+    plt.tight_layout()
+    plt.show()
+
+if plot_volume_and_sentiment:
+    df["hour"] = df["time"].dt.hour
+    volume = df.groupby("hour").size()
+    avg_sentiment = df.groupby("hour")["compound"].mean()
+
+    fig, ax1 = plt.subplots(figsize=(12, 6))
+    ax2 = ax1.twinx()
+    volume.plot(ax=ax1, kind="bar", alpha=0.4, color="gray", label="Volume")
+    avg_sentiment.plot(ax=ax2, color="blue", marker="o", label="Compound")
+
+    ax1.set_ylabel("Complaint Volume")
+    ax2.set_ylabel("Mean Compound Sentiment")
+    ax1.set_xlabel("Hour of Day")
+    plt.title("Complaint Volume & Sentiment Over the Day")
+    fig.legend(loc="upper left")
+    plt.tight_layout()
+    plt.show()

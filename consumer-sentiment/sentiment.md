@@ -80,9 +80,9 @@ docker compose -f consumer-sentiment/docker-compose.yaml down
 Make sure you have installed required packages
 - pip install notebook influxdb-client matplotlib pandas
 - pip install seaborn
+- pip install python-dotenv
 
 Replace the placeholder values
-- INFLUXDB_TOKEN = "your-influxdb-token"
 - bucket_type = "voice"
 
 Run the code
